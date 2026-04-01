@@ -20,6 +20,9 @@ class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
+    use_pvi: bool = False
+    pvi_aux_encoder_name: str = "facebook/dinov2-base"
+    pvi_injector_init_std: float = 0.0
 
     # Set the model specific defaults.
     action_dim: int = 32
@@ -46,6 +49,8 @@ class Pi0Config(_model.BaseModelConfig):
                 "max-autotune",
                 "max-autotune-no-cudagraphs",
             ]
+        if self.pvi_injector_init_std < 0:
+            raise ValueError("pvi_injector_init_std must be non-negative")
 
     @property
     @override

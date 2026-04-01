@@ -57,11 +57,22 @@ def create_trained_policy(
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
-        # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
-        # that the policy is using the same normalization stats as the original training process.
+        # Prefer the copy saved inside the checkpoint so inference uses the exact training-time statistics.
+        # Fall back to the config-provided assets when evaluating checkpoints that do not bundle norm stats
+        # (for example a converted base PyTorch checkpoint).
         if data_config.asset_id is None:
             raise ValueError("Asset id is required to load norm stats.")
-        norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+        try:
+            norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+        except FileNotFoundError:
+            if data_config.norm_stats is None:
+                raise
+            logging.info(
+                "Norm stats not found in checkpoint %s, falling back to config assets for %s",
+                checkpoint_dir,
+                data_config.asset_id,
+            )
+            norm_stats = data_config.norm_stats
 
     # Determine the device to use for PyTorch models
     if is_pytorch and pytorch_device is None:

@@ -114,6 +114,7 @@ class PI0Pytorch(nn.Module):
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
+        self._debug_metrics: dict[str, float] = {}
 
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
         try:
@@ -153,6 +154,14 @@ class PI0Pytorch(nn.Module):
                 func, *args, use_reentrant=False, preserve_rng_state=False, **kwargs
             )
         return func(*args, **kwargs)
+
+    def _set_debug_metrics(self, metrics: dict[str, float]) -> None:
+        self._debug_metrics = metrics
+
+    def pop_debug_metrics(self) -> dict[str, float]:
+        metrics = self._debug_metrics
+        self._debug_metrics = {}
+        return metrics
 
     def _prepare_attention_masks_4d(self, att_2d_masks):
         """Helper method to prepare 4D attention masks for transformer."""
@@ -460,3 +469,11 @@ class PI0Pytorch(nn.Module):
         suffix_out = suffix_out[:, -self.config.action_horizon :]
         suffix_out = suffix_out.to(dtype=torch.float32)
         return self.action_out_proj(suffix_out)
+
+
+def create_model(config):
+    if getattr(config, "use_pvi", False):
+        from openpi.models_pytorch.pi0_pvi_pytorch import PI0PVI
+
+        return PI0PVI(config)
+    return PI0Pytorch(config)

@@ -43,6 +43,7 @@ import openpi.models.gemma
 import openpi.models.model
 import openpi.models.pi0_config
 import openpi.models_pytorch.pi0_pytorch
+from openpi.shared import download as _download
 from openpi.training import utils
 import openpi.training.config as _config
 
@@ -412,10 +413,10 @@ def load_jax_model_and_print_keys(checkpoint_dir: str):
     Args:
         checkpoint_dir: Path to the checkpoint directory
     """
-    checkpoint_dir = os.path.abspath(checkpoint_dir) if not checkpoint_dir.startswith("gs://") else checkpoint_dir
+    checkpoint_dir = _download.maybe_download(checkpoint_dir)
     # Initialize checkpointer
     checkpointer = ocp.PyTreeCheckpointer()
-    metadata = checkpointer.metadata(f"{checkpoint_dir}/params")
+    metadata = checkpointer.metadata(str(checkpoint_dir / "params"))
     print(utils.array_tree_to_info(metadata))
 
 
@@ -431,11 +432,13 @@ def convert_pi0_checkpoint(
         output_path: Path to save the converted PyTorch model
         model_config: Model config
     """
+    checkpoint_dir = _download.maybe_download(checkpoint_dir)
+
     print(f"Converting PI0 checkpoint from {checkpoint_dir} to {output_path}")
     print(f"Model config: {model_config}")
 
     # Break down orbax ckpts by restoring via JAX to respect dtype
-    initial_params = slice_initial_orbax_checkpoint(checkpoint_dir=checkpoint_dir, restore_precision="float32")
+    initial_params = slice_initial_orbax_checkpoint(checkpoint_dir=str(checkpoint_dir), restore_precision="float32")
 
     # Process projection params
     if model_config.pi05:
@@ -507,7 +510,7 @@ def convert_pi0_checkpoint(
 
     # Process Gemma weights from expert_params
     gemma_params = slice_gemma_state_dict(
-        expert_params, action_expert_config, num_expert=1, checkpoint_dir=checkpoint_dir, pi05=model_config.pi05
+        expert_params, action_expert_config, num_expert=1, checkpoint_dir=str(checkpoint_dir), pi05=model_config.pi05
     )
 
     # Instantiate model
@@ -533,7 +536,7 @@ def convert_pi0_checkpoint(
     safetensors.torch.save_model(pi0_model, os.path.join(output_path, "model.safetensors"))
 
     # Copy assets folder if it exists
-    assets_source = pathlib.Path(checkpoint_dir).parent / "assets"
+    assets_source = checkpoint_dir / "assets"
     if assets_source.exists():
         assets_dest = pathlib.Path(output_path) / "assets"
         if assets_dest.exists():

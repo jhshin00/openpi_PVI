@@ -65,6 +65,9 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Base directory containing local LeRobot datasets.
+    # The dataset is expected at <lerobot_root>/<repo_id>.
+    lerobot_root: str | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -167,6 +170,8 @@ class ModelTransformFactory(GroupFactory):
 class DataConfigFactory(abc.ABC):
     # The LeRobot repo id.
     repo_id: str = tyro.MISSING
+    # Optional base directory for local LeRobot datasets.
+    lerobot_root: str | None = None
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
@@ -182,6 +187,7 @@ class DataConfigFactory(abc.ABC):
         return dataclasses.replace(
             self.base_config or DataConfig(),
             repo_id=repo_id,
+            lerobot_root=self.lerobot_root,
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
             use_quantile_norm=model_config.model_type != ModelType.PI0,
@@ -743,11 +749,12 @@ _CONFIGS = [
     TrainConfig(
         name="pi05_libero",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
-        data=LeRobotLiberoDataConfig(
-            repo_id="physical-intelligence/libero",
-            base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=False,
-        ),
+     data=LeRobotLiberoDataConfig(
+          repo_id="physical-intelligence/libero",
+          assets=AssetsConfig(assets_dir="./assets/pi05_libero_pvi"),
+          base_config=DataConfig(prompt_from_task=True),
+          extra_delta_transform=False,
+      ),
         batch_size=256,
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=10_000,
@@ -760,6 +767,137 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_libero_base_infer",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            pytorch_compile_mode=None,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(assets_dir="./assets/pi05_libero_pvi"),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=1,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="./checkpoints/pytorch/pi05_base",
+        num_train_steps=30_000,
+        wandb_enabled=False,
+        exp_name="pi05_libero_base_infer",
+    ),
+    TrainConfig(
+        name="pi0_libero_pvi",
+        model=pi0_config.Pi0Config(use_pvi=True),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        pytorch_weight_path="./checkpoints/pytorch/pi0_base",
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=1000,
+        keep_period=5000,
+        overwrite=False,
+        resume=False,
+        exp_name="pi0_libero_pvi_dino_base"
+    ),
+    TrainConfig(
+        name="pi0_libero_pvi_infer",
+        model=pi0_config.Pi0Config(use_pvi=True, pytorch_compile_mode=None),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        pytorch_weight_path="./checkpoints/pytorch/pi0_base",
+        num_train_steps=30_000,
+        batch_size=1,
+        log_interval=100,
+        save_interval=1000,
+        keep_period=5000,
+        overwrite=False,
+        resume=False,
+        wandb_enabled=False,
+        exp_name="pi0_libero_pvi_dino_base"
+    ),
+    TrainConfig(
+        name="pi05_libero_pvi_check",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False,
+                                   use_pvi=True,
+                                   pvi_aux_encoder_name="facebook/dinov2-base",
+                                   pvi_injector_init_std=0.0,),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(assets_dir="./assets/pi05_libero_pvi"),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="./checkpoints/pytorch/pi05_base",
+        num_train_steps=30_000,
+        batch_size=32,
+        log_interval=100,
+        save_interval=1000,
+        keep_period=5000,
+        overwrite=False,
+        resume=False,
+        exp_name="dinobase"
+    ),
+    TrainConfig(
+        name="pi05_libero_pvi_infer",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            use_pvi=True,
+            pytorch_compile_mode=None,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=3_000,
+            peak_lr=2.5e-5,
+            decay_steps=30_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="./checkpoints/pytorch/pi05_base",
+        num_train_steps=30_000,
+        batch_size=1,
+        log_interval=100,
+        save_interval=1000,
+        keep_period=5000,
+        overwrite=False,
+        resume=False,
+        wandb_enabled=False,
+        exp_name="pi05_libero_pvi_dino_base"
     ),
     #
     # Fine-tuning Aloha configs.
@@ -968,6 +1106,81 @@ _CONFIGS = [
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
+    
+
+    # jhshin experiment
+     TrainConfig(
+      name="pi05_libero_pvi_from_base",
+      model=pi0_config.Pi0Config(
+          pi05=True,
+          action_horizon=10,
+          discrete_state_input=False,
+          use_pvi=True,
+          pvi_aux_encoder_name="facebook/dinov2-base",
+          pvi_injector_init_std=0.0,   # zero-init 실험 계속이면 0.0 유지
+      ),
+      data=LeRobotLiberoDataConfig(
+          repo_id="physical-intelligence/libero",
+          assets=AssetsConfig(assets_dir="./assets/pi05_libero_pvi"),
+          base_config=DataConfig(prompt_from_task=True),
+          extra_delta_transform=False,
+      ),
+      lr_schedule=_optimizer.CosineDecaySchedule(
+          warmup_steps=4_000,
+          peak_lr=3.5e-5,
+          decay_steps=40_000,
+          decay_lr=3.5e-6,
+      ),
+      optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+      ema_decay=0.999,
+      weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+      pytorch_weight_path="./checkpoints/pytorch/pi05_base",
+      num_train_steps=40_000,
+      batch_size=128,
+      num_workers=4,
+      log_interval=100,
+      save_interval=2000,
+      keep_period=10000,
+      overwrite=False,
+      resume=False,
+      exp_name="pi05_libero_pvi_bs128_40k_from_base",
+  ),
+  TrainConfig(
+        name="pi05_libero_pvi_from_pi05_libero",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            use_pvi=True,
+            pvi_aux_encoder_name="facebook/dinov2-base",
+            pvi_injector_init_std=0.0,
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(assets_dir="./assets/pi05_libero_pvi"),
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=4_000,
+            peak_lr=3.5e-5,
+            decay_steps=40_000,
+            decay_lr=3.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_libero/params"),
+        pytorch_weight_path="./checkpoints/pytorch/pi05_libero",
+        num_train_steps=40_000,
+        batch_size=128,
+        num_workers=4,
+        log_interval=100,
+        save_interval=2000,
+        keep_period=10000,
+        overwrite=False,
+        resume=False,
+        exp_name="pi05_libero_pvi_bs128_40k_from_pi05_libero",
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):

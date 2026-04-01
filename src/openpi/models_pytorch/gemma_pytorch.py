@@ -208,7 +208,10 @@ class PaliGemmaWithExpertModel(nn.Module):
                 )
                 # Get head_dim from the current layer, not from the model
                 head_dim = self.paligemma.language_model.layers[layer_idx].self_attn.head_dim
-                att_output = att_output.reshape(batch_size, -1, 1 * 8 * head_dim)
+
+                num_heads = self.paligemma.language_model.layers[layer_idx].self_attn.q_proj.weight.shape[0] // head_dim
+
+                att_output = att_output.reshape(batch_size, -1, num_heads * head_dim)
 
                 # Process layer outputs
                 outputs_embeds = []
