@@ -1,8 +1,13 @@
 import collections
 import dataclasses
+import json
 import logging
 import math
 import pathlib
+import re
+from typing import Any
+from typing import Dict
+from typing import Optional
 
 import imageio
 from libero.libero import benchmark
@@ -34,6 +39,10 @@ class Args:
     task_suite_name: str = (
         "libero_object"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
+    task_category: Optional[str] = None  # Filter by classification category, e.g. "Camera Viewpoints"
+    difficulty_level: Optional[int] = None  # Filter by difficulty level 1-5
+    task_name_pattern: Optional[str] = None  # Optional regex filter on task names
+    task_limit: Optional[int] = None  # Optional cap after filtering
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 10  # Number of rollouts per task
 
@@ -41,6 +50,8 @@ class Args:
     # Utils
     #################################################################################################################
     video_out_path: str = "data/libero/pi05_libero_pvi_dino_base_debug1_30000/libero_object/videos"  # Path to save videos
+    save_videos: bool = True  # Disable for large suite-level evaluations.
+    summary_json_path: Optional[str] = None  # Optional JSON summary output path.
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -52,10 +63,15 @@ def eval_libero(args: Args) -> None:
     # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[args.task_suite_name]()
+    _filter_task_suite(task_suite, args)
     num_tasks_in_suite = task_suite.n_tasks
     logging.info(f"Task suite: {args.task_suite_name}")
+    logging.info(f"Filtered tasks: {num_tasks_in_suite}")
+    if num_tasks_in_suite == 0:
+        raise ValueError("No tasks remain after applying the requested filters.")
 
-    pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+    if args.save_videos:
+        pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
     if args.task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
@@ -65,7 +81,7 @@ def eval_libero(args: Args) -> None:
         max_steps = 300  # longest training demo has 270 steps
     elif args.task_suite_name == "libero_10":
         max_steps = 520  # longest training demo has 505 steps
-    elif args.task_suite_name == "libero_90":
+    elif args.task_suite_name in {"libero_90", "libero_100", "libero_mix"}:
         max_steps = 400  # longest training demo has 373 steps
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
@@ -74,9 +90,16 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    task_classification = _load_task_classification()
+    category_stats = collections.defaultdict(lambda: {"episodes": 0, "successes": 0})
+    difficulty_stats = collections.defaultdict(lambda: {"episodes": 0, "successes": 0})
+    task_stats = []
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
         # Get task
         task = task_suite.get_task(task_id)
+        task_meta = _get_task_metadata(task_suite.name, task.name, task_classification)
+        task_category = task_meta.get("category") or "Unclassified"
+        task_difficulty = task_meta.get("difficulty_level")
 
         # Get default LIBERO initial states
         initial_states = task_suite.get_task_init_states(task_id)
@@ -98,6 +121,7 @@ def eval_libero(args: Args) -> None:
 
             # Setup
             t = 0
+            done = False
             replay_images = []
 
             logging.info(f"Starting episode {task_episodes+1}...")
@@ -163,15 +187,23 @@ def eval_libero(args: Args) -> None:
 
             task_episodes += 1
             total_episodes += 1
+            category_stats[task_category]["episodes"] += 1
+            if task_difficulty is not None:
+                difficulty_stats[task_difficulty]["episodes"] += 1
+            if done:
+                category_stats[task_category]["successes"] += 1
+                if task_difficulty is not None:
+                    difficulty_stats[task_difficulty]["successes"] += 1
 
             # Save a replay video of the episode
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
+            if args.save_videos:
+                suffix = "success" if done else "failure"
+                task_segment = task_description.replace(" ", "_")
+                imageio.mimwrite(
+                    pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
+                    [np.asarray(x) for x in replay_images],
+                    fps=10,
+                )
 
             # Log current results
             logging.info(f"Success: {done}")
@@ -181,19 +213,154 @@ def eval_libero(args: Args) -> None:
         # Log final results
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+        task_stats.append(
+            {
+                "task_name": task.name,
+                "task_description": task_description,
+                "category": task_category,
+                "difficulty_level": task_difficulty,
+                "episodes": task_episodes,
+                "successes": task_successes,
+                "success_rate": (float(task_successes) / float(task_episodes)) if task_episodes else 0.0,
+            }
+        )
 
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
+    logging.info("Per-category success rates:")
+    for category in sorted(category_stats):
+        episodes = category_stats[category]["episodes"]
+        successes = category_stats[category]["successes"]
+        logging.info(
+            "  %s: %d/%d (%.4f)",
+            category,
+            successes,
+            episodes,
+            float(successes) / float(episodes) if episodes else 0.0,
+        )
+
+    summary = {
+        "suite_name": args.task_suite_name,
+        "filters": {
+            "task_category": args.task_category,
+            "difficulty_level": args.difficulty_level,
+            "task_name_pattern": args.task_name_pattern,
+            "task_limit": args.task_limit,
+        },
+        "num_trials_per_task": args.num_trials_per_task,
+        "total_episodes": total_episodes,
+        "total_successes": total_successes,
+        "total_success_rate": (float(total_successes) / float(total_episodes)) if total_episodes else 0.0,
+        "per_category": {
+            category: {
+                "episodes": stats["episodes"],
+                "successes": stats["successes"],
+                "success_rate": (float(stats["successes"]) / float(stats["episodes"])) if stats["episodes"] else 0.0,
+            }
+            for category, stats in sorted(category_stats.items())
+        },
+        "per_difficulty": {
+            str(level): {
+                "episodes": stats["episodes"],
+                "successes": stats["successes"],
+                "success_rate": (float(stats["successes"]) / float(stats["episodes"])) if stats["episodes"] else 0.0,
+            }
+            for level, stats in sorted(difficulty_stats.items())
+        },
+        "tasks": task_stats,
+    }
+    if args.summary_json_path is not None:
+        summary_path = pathlib.Path(args.summary_json_path)
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.write_text(json.dumps(summary, indent=2))
+        logging.info("Wrote summary JSON to %s", summary_path)
 
 
 def _get_libero_env(task, resolution, seed):
     """Initializes and returns the LIBERO environment, along with the task description."""
     task_description = task.language
     task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
-    env_args = {"bddl_file_name": task_bddl_file, "camera_heights": resolution, "camera_widths": resolution}
+    env_args = {"bddl_file_name": str(task_bddl_file), "camera_heights": resolution, "camera_widths": resolution}
     env = OffScreenRenderEnv(**env_args)
     env.seed(seed)  # IMPORTANT: seed seems to affect object positions even when using fixed initial state
     return env, task_description
+
+
+def _load_task_classification() -> Dict[str, Dict[str, Dict[str, Any]]]:
+    classification_path = pathlib.Path(__file__).resolve().parents[2] / "third_party/libero-plus/libero/libero/benchmark/task_classification.json"
+    with open(classification_path, "r") as f:
+        raw = json.load(f)
+    return {
+        suite_name: {entry["name"]: entry for entry in entries}
+        for suite_name, entries in raw.items()
+    }
+
+
+def _filter_task_suite(task_suite, args: Args) -> None:
+    if (
+        args.task_category is None
+        and args.difficulty_level is None
+        and args.task_name_pattern is None
+        and args.task_limit is None
+    ):
+        return
+
+    task_classification = _load_task_classification()
+    suite_classification = task_classification.get(task_suite.name, {})
+    task_name_pattern = re.compile(args.task_name_pattern) if args.task_name_pattern is not None else None
+
+    filtered_tasks = []
+    for task in task_suite.tasks:
+        task_meta = suite_classification.get(task.name)
+        if args.task_category is not None:
+            task_category = task_meta.get("category") if task_meta is not None else _infer_task_category(task.name)
+            if task_category != args.task_category:
+                continue
+        if args.difficulty_level is not None:
+            if task_meta is None or task_meta.get("difficulty_level") != args.difficulty_level:
+                continue
+        if task_name_pattern is not None and not task_name_pattern.search(task.name):
+            continue
+        filtered_tasks.append(task)
+
+    if args.task_limit is not None:
+        filtered_tasks = filtered_tasks[: args.task_limit]
+
+    task_suite.tasks = filtered_tasks
+    task_suite.n_tasks = len(filtered_tasks)
+
+
+def _get_task_metadata(
+    suite_name: str,
+    task_name: str,
+    task_classification: Dict[str, Dict[str, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    suite_classification = task_classification.get(suite_name, {})
+    task_meta = dict(suite_classification.get(task_name, {}))
+    if "category" not in task_meta or task_meta["category"] is None:
+        task_meta["category"] = _infer_task_category(task_name)
+    if "difficulty_level" not in task_meta:
+        task_meta["difficulty_level"] = None
+    return task_meta
+
+
+def _infer_task_category(task_name: str) -> Optional[str]:
+    if "_noise_" in task_name:
+        return "Sensor Noise"
+    if "_language_" in task_name:
+        return "Language Instructions"
+    if "_light_" in task_name:
+        return "Light Conditions"
+    if "_add_" in task_name or "moved_level" in task_name:
+        return "Objects Layout"
+    if "_table_" in task_name or "_tb_" in task_name:
+        return "Background Textures"
+    if "_view_" in task_name:
+        match = re.search(r"_initstate_(\d+)", task_name)
+        if match is not None and match.group(1) != "0":
+            return "Robot Initial States"
+        return "Camera Viewpoints"
+    return None
 
 
 def _quat2axisangle(quat):

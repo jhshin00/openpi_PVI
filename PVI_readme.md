@@ -783,3 +783,159 @@ CUDA_VISIBLE_DEVICES=1 python examples/libero/main.py \
     --args.port 8001 \
     --args.task-suite-name libero_10 \
     --args.video_out_path data/libero/pi05_libero_base/libero_10/videos
+
+
+### LIBERO PLUS EVAL
+
+CUDA_VISIBLE_DEVICES=0 uv run scripts/serve_policy.py \
+    --port 8000 \
+    policy:checkpoint \
+    --policy.config pi05_libero_base_infer \
+    --policy.dir /data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+
+START_SERVER=0 \
+  PORT=8000 \
+  NUM_TRIALS_PER_TASK=1 \
+  SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+  ./scripts/eval_libero_plus_by_suite.sh
+
+
+두 터미널로 할 때
+
+  터미널 1:
+
+  cd /data/jhshin/openpi-libero-plus
+
+  CUDA_VISIBLE_DEVICES=0 uv run scripts/serve_policy.py \
+    --port 8000 \
+    policy:checkpoint \
+    --policy.config pi05_libero_base_infer \
+    --policy.dir /data/jhshin/openpi/checkpoints/pytorch/pi05_libero
+
+  cd /data/jhshin/openpi-libero-plus
+
+  START_SERVER=0 \
+  PORT=8000 \
+  NUM_TRIALS_PER_TASK=1 \
+  SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+  ./scripts/eval_libero_plus_by_suite.sh
+
+  한 터미널로 바로 할 때
+
+  cd /data/jhshin/openpi-libero-plus
+
+  SERVER_CONFIG=pi05_libero_base_infer \
+  SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+  PORT=8000 \
+  NUM_TRIALS_PER_TASK=1 \
+  ./scripts/eval_libero_plus_by_suite.sh
+
+
+  cd /data/jhshin/openpi-libero-plus
+
+  CUDA_VISIBLE_DEVICES=0 \
+  SERVER_CONFIG=pi05_libero_base_infer \
+  SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+  PORT=8000 \
+  NUM_TRIALS_PER_TASK=1 \
+  ./scripts/eval_libero_plus_by_suite.sh
+
+  이렇게 하면 스크립트가 내부에서 띄우는 serve_policy.py도 CUDA_VISIBLE_DEVICES=0를 그대로 상속받습니다.
+  평가 client는 주로 시뮬레이션/렌더링 쪽이라, 보통은 이 값이 사실상 policy server GPU 선택용이라고 보면 됩니다.
+
+  결과 형태는 이렇습니다.
+
+  per_suite_category_summary.json
+
+  {
+    "libero_spatial": {
+      "total_success_rate": 0.53,
+      "total_episodes": 2402,
+      "total_successes": 1273,
+      "per_category": {
+        "Camera Viewpoints": {
+          "episodes": 376,
+          "successes": 42,
+          "success_rate": 0.1117
+        },
+        "Robot Initial States": {
+          "episodes": 350,
+          "successes": 18,
+          "success_rate": 0.0514
+        }
+      },
+      "per_difficulty": {
+        "1": {
+          "episodes": 233,
+          "successes": 120,
+          "success_rate": 0.515
+        }
+      }
+    },
+    "libero_object": {
+      "...": "..."
+    }
+  }
+
+  per_suite_category_summary.csv
+  한 줄에 suite 하나입니다.
+
+  suite,total_success_rate,total_episodes,total_successes,Camera Viewpoints,Robot Initial States,Language
+  Instructions,Light Conditions,Background Textures,Sensor Noise,Objects Layout
+  libero_spatial,0.53,2402,1273,0.11,0.05,0.62,0.84,0.79,0.74,0.68
+  libero_object,0.49,2518,1234,0.09,0.04,0.58,0.81,0.76,0.71,0.65
+
+  per_suite_category_summary_long.csv
+  한 줄에 suite x category 하나입니다.
+
+  suite,category,episodes,successes,success_rate
+  libero_spatial,Camera Viewpoints,376,42,0.1117
+  libero_spatial,Robot Initial States,350,18,0.0514
+  libero_spatial,Language Instructions,390,241,0.6179
+  libero_object,Camera Viewpoints,396,37,0.0934
+
+---
+cd /data/jhshin/openpi-libero-plus
+
+CUDA_VISIBLE_DEVICES=0 \
+SERVER_CONFIG=pi05_libero_base_infer \
+SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+PORT=8000 \
+NUM_TRIALS_PER_TASK=1 \
+./scripts/eval_libero_plus_by_suite.sh
+
+---
+
+CUDA_VISIBLE_DEVICES=0 \
+  SERVER_CONFIG=pi05_libero_base_infer \
+  SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+  PORT=8000 \
+  NUM_TRIALS_PER_TASK=1 \
+  bash ./scripts/eval_libero_plus_by_suite.sh
+
+
+START_SERVER=0 \
+  NUM_TRIALS_PER_TASK=1 \
+  PARALLEL_JOBS=4 \
+  SUITE_PORT_MAP="libero_spatial:8000,libero_goal:8000,libero_object:8001,libero_10:8001" \
+  ./scripts/eval_libero_plus_by_suite.sh
+
+### 만약 하나 꺼졌을때
+MUJOCO_EGL_DEVICE_ID=1 \
+  START_SERVER=0 \
+  PORT=8001 \
+  PARALLEL_JOBS=1 \
+  OUTPUT_TAG=pi05_libero_spatial_retry \
+  ./scripts/eval_libero_plus_by_suite.sh libero_spatial
+  
+START_SERVER=0 \
+  PORT=8000 \
+  PARALLEL_JOBS=1 \
+  OUTPUT_TAG=pi05_libero_10_retry \
+  ./scripts/eval_libero_plus_by_suite.sh libero_10
+
+  ---
+### 전체 한번에 (main/py)
+PARALLEL_JOBS=4 \
+  SUITE_PORT_MAP="libero_10:8000,libero_spatial:8001,libero_goal:8002,libero_object:8003" \
+  ./scripts/eval_libero_plus_by_suite.sh

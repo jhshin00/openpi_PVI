@@ -1,0 +1,5 @@
+benchmark_root: /data/jhshin/openpi-libero-plus/third_party/libero-plus/libero/libero
+bddl_files: /data/jhshin/openpi-libero-plus/third_party/libero-plus/libero/libero/bddl_files
+init_states: /data/jhshin/openpi-libero-plus/third_party/libero-plus/libero/libero/init_files
+datasets: /data/jhshin/openpi-libero-plus/third_party/libero-plus/libero/datasets
+assets: /data/jhshin/openpi-libero-plus/third_party/libero-plus/libero/libero/assets
