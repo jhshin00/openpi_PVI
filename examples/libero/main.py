@@ -3,6 +3,7 @@ import dataclasses
 import logging
 import math
 import pathlib
+from typing import Optional
 
 import imageio
 from libero.libero import benchmark
@@ -40,7 +41,7 @@ class Args:
     #################################################################################################################
     # Utils
     #################################################################################################################
-    video_out_path: str = "data/libero/pi05_libero_pvi_dino_base_debug1_30000/libero_object/videos"  # Path to save videos
+    video_out_path: Optional[str] = "data/libero/pi05_libero_pvi_dino_base_debug1_30000/libero_object/videos"  # Path to save videos. Set to None to disable video saving.
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -55,7 +56,8 @@ def eval_libero(args: Args) -> None:
     num_tasks_in_suite = task_suite.n_tasks
     logging.info(f"Task suite: {args.task_suite_name}")
 
-    pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+    if args.video_out_path is not None:
+        pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
     if args.task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
@@ -98,7 +100,7 @@ def eval_libero(args: Args) -> None:
 
             # Setup
             t = 0
-            replay_images = []
+            replay_images = [] if args.video_out_path is not None else None
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -121,8 +123,9 @@ def eval_libero(args: Args) -> None:
                         image_tools.resize_with_pad(wrist_img, args.resize_size, args.resize_size)
                     )
 
-                    # Save preprocessed image for replay video
-                    replay_images.append(img)
+                    # Save preprocessed image for replay video when enabled.
+                    if replay_images is not None:
+                        replay_images.append(img)
 
                     if not action_plan:
                         # Finished executing previous action chunk -- compute new chunk
@@ -164,14 +167,15 @@ def eval_libero(args: Args) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            # Save a replay video of the episode
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
+            # Save a replay video of the episode when enabled.
+            if replay_images is not None:
+                suffix = "success" if done else "failure"
+                task_segment = task_description.replace(" ", "_")
+                imageio.mimwrite(
+                    pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
+                    [np.asarray(x) for x in replay_images],
+                    fps=10,
+                )
 
             # Log current results
             logging.info(f"Success: {done}")

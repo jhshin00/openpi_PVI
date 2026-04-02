@@ -760,26 +760,39 @@ CUDA_VISIBLE_DEVICES=1 uv run scripts/serve_policy.py \
 source examples/libero/.venv/bin/activate
 export PYTHONPATH=$PYTHONPATH:$PWD/third_party/libero
 
+
+CUDA_VISIBLE_DEVICES=5 uv run scripts/serve_policy.py \
+      --port 8008 \
+      policy:checkpoint \
+      --policy.config pi05_libero_pvi_infer \
+      --policy.dir checkpoints/pi05_libero_pvi_from_pi05_libero/pi05_libero_pvi_bs128_40k_from_pi05_libero/40000
+
 CUDA_VISIBLE_DEVICES=0 python examples/libero/main.py \
     --args.host 127.0.0.1 \
-    --args.port 8000 \
+    --args.port 8006 \
     --args.task-suite-name libero_spatial \
-    --args.video_out_path data/libero/pi05_libero_base/libero_spatial/videos
+    --args.video_out_path None
 
 CUDA_VISIBLE_DEVICES=1 python examples/libero/main.py \
     --args.host 127.0.0.1 \
-    --args.port 8000 \
+    --args.port 8007 \
     --args.task-suite-name libero_object \
-    --args.video_out_path data/libero/pi05_libero_base/libero_object/videos
+    --args.video_out_path None
 
 CUDA_VISIBLE_DEVICES=0 python examples/libero/main.py \
     --args.host 127.0.0.1 \
-    --args.port 8000 \
+    --args.port 8008 \
     --args.task-suite-name libero_goal \
-    --args.video_out_path data/libero/pi05_libero_base/libero_goal/videos
+    --args.video_out_path None
 
 CUDA_VISIBLE_DEVICES=1 python examples/libero/main.py \
     --args.host 127.0.0.1 \
-    --args.port 8001 \
+    --args.port 8009 \
     --args.task-suite-name libero_10 \
-    --args.video_out_path data/libero/pi05_libero_base/libero_10/videos
+    --args.video_out_path None
+
+CUDA_VISIBLE_DEVICES=2 uv run scripts/serve_policy.py \
+      --port 8006 \
+      policy:checkpoint \
+      --policy.config pi05_libero_pvi_infer \
+      --policy.dir checkpoints/pi05_libero_pvi_from_pi05_libero/pi05_libero_pvi_bs128_40k_from_pi05_libero/40000
