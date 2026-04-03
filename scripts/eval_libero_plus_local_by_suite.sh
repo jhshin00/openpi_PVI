@@ -2,15 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CLIENT_PYTHON="$ROOT_DIR/examples/libero/.venv/bin/python"
+CLIENT_PYTHON="$ROOT_DIR/.venv/bin/python"
 
-HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8000}"
-START_SERVER="${START_SERVER:-1}"
-SERVER_CONFIG="${SERVER_CONFIG:-pi05_libero_base_infer}"
-SERVER_CHECKPOINT_DIR="${SERVER_CHECKPOINT_DIR:-/data/jhshin/openpi/checkpoints/pytorch/pi05_libero}"
+POLICY_CONFIG="${POLICY_CONFIG:-pi05_libero_base_infer}"
+POLICY_DIR="${POLICY_DIR:-/data/jhshin/openpi/checkpoints/pytorch/pi05_libero}"
+POLICY_PYTORCH_DEVICE="${POLICY_PYTORCH_DEVICE:-}"
 NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-1}"
-OUTPUT_TAG="${OUTPUT_TAG:-$(basename "$SERVER_CHECKPOINT_DIR")}"
+OUTPUT_TAG="${OUTPUT_TAG:-$(basename "$POLICY_DIR")_local}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$ROOT_DIR/data/libero_plus_eval/$OUTPUT_TAG}"
 TASK_CATEGORY="${TASK_CATEGORY:-}"
 DIFFICULTY_LEVEL="${DIFFICULTY_LEVEL:-}"
@@ -19,8 +17,9 @@ TASK_START_INDEX="${TASK_START_INDEX:-}"
 TASK_LIMIT="${TASK_LIMIT:-}"
 MUJOCO_GL_VALUE="${MUJOCO_GL:-}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-1}"
-SUITE_PORT_MAP="${SUITE_PORT_MAP:-}"
-SUITE_HOST_MAP="${SUITE_HOST_MAP:-}"
+SUITE_CUDA_VISIBLE_DEVICES_MAP="${SUITE_CUDA_VISIBLE_DEVICES_MAP:-}"
+SUITE_MUJOCO_EGL_DEVICE_ID_MAP="${SUITE_MUJOCO_EGL_DEVICE_ID_MAP:-}"
+SUITE_POLICY_DEVICE_MAP="${SUITE_POLICY_DEVICE_MAP:-}"
 
 if [[ "$#" -gt 0 ]]; then
   SUITES=("$@")
@@ -28,28 +27,42 @@ else
   SUITES=("libero_spatial" "libero_object" "libero_goal" "libero_10")
 fi
 
-export LIBERO_CONFIG_PATH="$ROOT_DIR/.libero-plus-config"
-export PYTHONPATH="$ROOT_DIR/third_party/libero-plus:${PYTHONPATH:-}"
-
 mkdir -p "$OUTPUT_ROOT"
 
 if [[ ! -x "$CLIENT_PYTHON" ]]; then
-  echo "Missing client python at $CLIENT_PYTHON" >&2
+  echo "Missing root python at $CLIENT_PYTHON" >&2
   exit 1
 fi
 
-if ! "$CLIENT_PYTHON" -c "import libero" >/dev/null 2>&1; then
-  echo "The examples/libero client environment does not have LIBERO-plus installed." >&2
-  echo "Run: uv pip install -e third_party/libero-plus" >&2
-  exit 1
-fi
+validate_egl_mapping() {
+  local visible_devices="$1"
+  local egl_device="$2"
 
-cleanup() {
-  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "$SERVER_PID" >/dev/null 2>&1; then
-    kill "$SERVER_PID" >/dev/null 2>&1 || true
-    wait "$SERVER_PID" >/dev/null 2>&1 || true
+  if [[ -z "$visible_devices" || -z "$egl_device" ]]; then
+    return
   fi
+
+  IFS=',' read -ra device_ids <<< "$visible_devices"
+  for device_id in "${device_ids[@]}"; do
+    if [[ "$device_id" == "$egl_device" ]]; then
+      return
+    fi
+  done
+
+  echo "Invalid EGL configuration: MUJOCO_EGL_DEVICE_ID=$egl_device must be one of CUDA_VISIBLE_DEVICES=$visible_devices" >&2
+  exit 1
 }
+
+validate_egl_mapping "${CUDA_VISIBLE_DEVICES:-}" "${MUJOCO_EGL_DEVICE_ID:-}"
+
+if ! LIBERO_CONFIG_PATH="$ROOT_DIR/.libero-plus-config" \
+  PYTHONPATH="$ROOT_DIR/third_party/libero-plus:${PYTHONPATH:-}" \
+  "$CLIENT_PYTHON" -c "import openpi, robosuite, bddl, robomimic, wand, skimage; from libero.libero import benchmark" >/dev/null 2>&1; then
+  echo "The root environment is missing LIBERO-plus local-eval dependencies." >&2
+  echo "Run the setup script, then retry:" >&2
+  echo "  ./scripts/setup_libero_plus_env.sh" >&2
+  exit 1
+fi
 
 resolve_suite_value() {
   local suite="$1"
@@ -75,68 +88,54 @@ resolve_suite_value() {
   echo "$default_value"
 }
 
-wait_for_server() {
-  local host="$1"
-  local port="$2"
-  local retries="${3:-60}"
-  local delay_s="${4:-2}"
-
-  for _ in $(seq 1 "$retries"); do
-    if (echo >"/dev/tcp/$host/$port") >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep "$delay_s"
-  done
-  return 1
-}
-
-if [[ "$START_SERVER" == "1" ]]; then
-  if [[ -n "$SUITE_PORT_MAP" || -n "$SUITE_HOST_MAP" ]]; then
-    echo "START_SERVER=1 only supports a single server. For per-suite host/port routing, start servers manually and use START_SERVER=0." >&2
-    exit 1
-  fi
-  SERVER_LOG="$OUTPUT_ROOT/server.log"
-  (
-    cd "$ROOT_DIR"
-    uv run scripts/serve_policy.py \
-      policy:checkpoint \
-      --policy.config "$SERVER_CONFIG" \
-      --policy.dir "$SERVER_CHECKPOINT_DIR" \
-      --port "$PORT"
-  ) >"$SERVER_LOG" 2>&1 &
-  SERVER_PID=$!
-  trap cleanup EXIT
-
-  if ! wait_for_server "$HOST" "$PORT"; then
-    echo "Server did not become ready on $HOST:$PORT. Check $SERVER_LOG" >&2
-    exit 1
-  fi
-fi
-
 run_suite() {
   local suite="$1"
-  local suite_host
-  local suite_port
-  suite_host="$(resolve_suite_value "$suite" "$SUITE_HOST_MAP" "$HOST")"
-  suite_port="$(resolve_suite_value "$suite" "$SUITE_PORT_MAP" "$PORT")"
-  suite_output_dir="$OUTPUT_ROOT/$suite"
-  suite_log="$suite_output_dir/eval.log"
-  suite_summary="$suite_output_dir/summary.json"
+  local suite_cuda
+  local suite_egl
+  local suite_policy_device
+
+  suite_cuda="$(resolve_suite_value "$suite" "$SUITE_CUDA_VISIBLE_DEVICES_MAP" "${CUDA_VISIBLE_DEVICES:-}")"
+  suite_egl="$(resolve_suite_value "$suite" "$SUITE_MUJOCO_EGL_DEVICE_ID_MAP" "${MUJOCO_EGL_DEVICE_ID:-}")"
+  suite_policy_device="$(resolve_suite_value "$suite" "$SUITE_POLICY_DEVICE_MAP" "$POLICY_PYTORCH_DEVICE")"
+
+  validate_egl_mapping "$suite_cuda" "$suite_egl"
+
+  local suite_output_dir="$OUTPUT_ROOT/$suite"
+  local suite_log="$suite_output_dir/eval.log"
+  local suite_summary="$suite_output_dir/summary.json"
 
   mkdir -p "$suite_output_dir"
 
-  cmd=(
+  local -a env_cmd=(
+    env
+    "LIBERO_CONFIG_PATH=$ROOT_DIR/.libero-plus-config"
+    "PYTHONPATH=$ROOT_DIR/third_party/libero-plus:${PYTHONPATH:-}"
+  )
+  if [[ -n "$suite_cuda" ]]; then
+    env_cmd+=("CUDA_VISIBLE_DEVICES=$suite_cuda")
+  fi
+  if [[ -n "$suite_egl" ]]; then
+    env_cmd+=("MUJOCO_EGL_DEVICE_ID=$suite_egl")
+  fi
+  if [[ -n "$MUJOCO_GL_VALUE" ]]; then
+    env_cmd+=("MUJOCO_GL=$MUJOCO_GL_VALUE")
+  fi
+
+  local -a cmd=(
     "$CLIENT_PYTHON"
     "$ROOT_DIR/examples/libero/main.py"
-    --args.host "$suite_host"
-    --args.port "$suite_port"
     --args.task-suite-name "$suite"
     --args.num-trials-per-task "$NUM_TRIALS_PER_TASK"
     --args.summary-json-path "$suite_summary"
     --args.video-out-path "$suite_output_dir/videos"
     --args.no-save-videos
+    --args.policy-config "$POLICY_CONFIG"
+    --args.policy-dir "$POLICY_DIR"
   )
 
+  if [[ -n "$suite_policy_device" ]]; then
+    cmd+=(--args.policy-pytorch-device "$suite_policy_device")
+  fi
   if [[ -n "$TASK_CATEGORY" ]]; then
     cmd+=(--args.task-category "$TASK_CATEGORY")
   fi
@@ -153,12 +152,8 @@ run_suite() {
     cmd+=(--args.task-limit "$TASK_LIMIT")
   fi
 
-  echo "Evaluating suite: $suite (server ${suite_host}:${suite_port})"
-  if [[ -n "$MUJOCO_GL_VALUE" ]]; then
-    MUJOCO_GL="$MUJOCO_GL_VALUE" "${cmd[@]}" 2>&1 | tee "$suite_log"
-  else
-    "${cmd[@]}" 2>&1 | tee "$suite_log"
-  fi
+  echo "Evaluating suite: $suite (local policy config=$POLICY_CONFIG dir=$POLICY_DIR cuda=${suite_cuda:-inherit})"
+  "${env_cmd[@]}" "${cmd[@]}" 2>&1 | tee "$suite_log"
 }
 
 if [[ "$PARALLEL_JOBS" -le 1 ]]; then
@@ -199,6 +194,8 @@ for suite in suites:
         "total_success_rate": summary["total_success_rate"],
         "total_episodes": summary["total_episodes"],
         "total_successes": summary["total_successes"],
+        "num_completed_tasks": summary.get("num_completed_tasks"),
+        "num_tasks_in_suite": summary.get("num_tasks_in_suite"),
         "per_category": summary["per_category"],
         "per_difficulty": summary["per_difficulty"],
     }

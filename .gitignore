@@ -2,7 +2,10 @@
 assets/
 checkpoints/
 data/
+lerobot/
 wandb/
+.libero-plus-config/
+third_party/libero-plus/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

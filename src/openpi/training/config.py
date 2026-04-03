@@ -362,6 +362,57 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotLiberoPlusDataConfig(DataConfigFactory):
+    """
+    Data config for the LIBERO-plus LeRobot export.
+
+    The LIBERO-plus dataset uses the newer LeRobot schema with nested observation
+    keys and `action` as the action column. We repack that schema back into the
+    inference-facing keys expected by the existing LIBERO transforms.
+    """
+
+    extra_delta_transform: bool = False
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/image": "observation.images.front",
+                        "observation/wrist_image": "observation.images.wrist",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.LiberoInputs(model_type=model_config.model_type)],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=("action",),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -1145,6 +1196,76 @@ _CONFIGS = [
       resume=False,
       exp_name="pi05_libero_pvi_bs128_40k_from_base",
   ),
+    TrainConfig(
+        name="pi05_libero_plus_pvi_from_base",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            use_pvi=True,
+            pvi_aux_encoder_name="facebook/dinov2-base",
+            pvi_injector_init_std=0.0,
+        ),
+        data=LeRobotLiberoPlusDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=4_000,
+            peak_lr=3.5e-5,
+            decay_steps=40_000,
+            decay_lr=3.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="./checkpoints/pytorch/pi05_base",
+        num_train_steps=40_000,
+        batch_size=128,
+        num_workers=4,
+        log_interval=100,
+        save_interval=2000,
+        keep_period=10000,
+        overwrite=False,
+        resume=False,
+        exp_name="pi05_libero_plus_pvi_bs128_40k_from_base",
+    ),
+    TrainConfig(
+        name="pi05_libero_plus_pvi_from_pi05_libero",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            use_pvi=True,
+            pvi_aux_encoder_name="facebook/dinov2-base",
+            pvi_injector_init_std=0.0,
+        ),
+        data=LeRobotLiberoPlusDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=16_000,
+            peak_lr=3.5e-5,
+            decay_steps=160_000,
+            decay_lr=3.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_libero/params"),
+        pytorch_weight_path="/data/jhshin/openpi/checkpoints/pytorch/pi05_libero",
+        num_train_steps=160_000,
+        batch_size=128,
+        num_workers=4,
+        log_interval=100,
+        save_interval=4_000,
+        keep_period=50_000,
+        overwrite=False,
+        resume=False,
+        exp_name="pi05_libero_plus_pvi_bs128_160k_from_pi05_libero",
+    ),
   TrainConfig(
         name="pi05_libero_pvi_from_pi05_libero",
         model=pi0_config.Pi0Config(

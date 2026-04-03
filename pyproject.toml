@@ -58,6 +58,18 @@ rlds = [
     "tensorflow-cpu==2.15.0",
     "tensorflow-datasets==4.9.9",
 ]
+libero-plus = [
+    "bddl==1.0.1",
+    "cloudpickle>=2.1.0",
+    "easydict==1.9",
+    "future>=0.18.2",
+    "gym==0.25.2",
+    "matplotlib>=3.5.3,<4",
+    "robomimic==0.2.0",
+    "robosuite==1.4.0",
+    "scikit-image>=0.24,<1",
+    "wand>=0.6.13",
+]
 
 [tool.uv]
 override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74"]

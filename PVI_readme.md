@@ -785,157 +785,120 @@ CUDA_VISIBLE_DEVICES=1 python examples/libero/main.py \
     --args.video_out_path data/libero/pi05_libero_base/libero_10/videos
 
 
-### LIBERO PLUS EVAL
+## LIBERO-plus Recipes
 
-CUDA_VISIBLE_DEVICES=0 uv run scripts/serve_policy.py \
-    --port 8000 \
-    policy:checkpoint \
-    --policy.config pi05_libero_base_infer \
-    --policy.dir /data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+### Train PI0.5 + PVI on the LIBERO-plus LeRobot Dataset
 
-START_SERVER=0 \
-  PORT=8000 \
-  NUM_TRIALS_PER_TASK=1 \
-  SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
-  ./scripts/eval_libero_plus_by_suite.sh
+These commands assume:
 
+- the dataset lives at `./lerobot/physical-intelligence/libero`
+- the starting PyTorch checkpoint is `/data/jhshin/openpi/checkpoints/pytorch/pi05_libero`
+- you want to fine-tune from the LIBERO-finetuned PI0.5 checkpoint, not from `pi05_base`
 
-두 터미널로 할 때
+One-time setup for the root environment:
 
-  터미널 1:
-
-  cd /data/jhshin/openpi-libero-plus
-
-  CUDA_VISIBLE_DEVICES=0 uv run scripts/serve_policy.py \
-    --port 8000 \
-    policy:checkpoint \
-    --policy.config pi05_libero_base_infer \
-    --policy.dir /data/jhshin/openpi/checkpoints/pytorch/pi05_libero
-
-  cd /data/jhshin/openpi-libero-plus
-
-  START_SERVER=0 \
-  PORT=8000 \
-  NUM_TRIALS_PER_TASK=1 \
-  SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
-  ./scripts/eval_libero_plus_by_suite.sh
-
-  한 터미널로 바로 할 때
-
-  cd /data/jhshin/openpi-libero-plus
-
-  SERVER_CONFIG=pi05_libero_base_infer \
-  SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
-  PORT=8000 \
-  NUM_TRIALS_PER_TASK=1 \
-  ./scripts/eval_libero_plus_by_suite.sh
-
-
-  cd /data/jhshin/openpi-libero-plus
-
-  CUDA_VISIBLE_DEVICES=0 \
-  SERVER_CONFIG=pi05_libero_base_infer \
-  SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
-  PORT=8000 \
-  NUM_TRIALS_PER_TASK=1 \
-  ./scripts/eval_libero_plus_by_suite.sh
-
-  이렇게 하면 스크립트가 내부에서 띄우는 serve_policy.py도 CUDA_VISIBLE_DEVICES=0를 그대로 상속받습니다.
-  평가 client는 주로 시뮬레이션/렌더링 쪽이라, 보통은 이 값이 사실상 policy server GPU 선택용이라고 보면 됩니다.
-
-  결과 형태는 이렇습니다.
-
-  per_suite_category_summary.json
-
-  {
-    "libero_spatial": {
-      "total_success_rate": 0.53,
-      "total_episodes": 2402,
-      "total_successes": 1273,
-      "per_category": {
-        "Camera Viewpoints": {
-          "episodes": 376,
-          "successes": 42,
-          "success_rate": 0.1117
-        },
-        "Robot Initial States": {
-          "episodes": 350,
-          "successes": 18,
-          "success_rate": 0.0514
-        }
-      },
-      "per_difficulty": {
-        "1": {
-          "episodes": 233,
-          "successes": 120,
-          "success_rate": 0.515
-        }
-      }
-    },
-    "libero_object": {
-      "...": "..."
-    }
-  }
-
-  per_suite_category_summary.csv
-  한 줄에 suite 하나입니다.
-
-  suite,total_success_rate,total_episodes,total_successes,Camera Viewpoints,Robot Initial States,Language
-  Instructions,Light Conditions,Background Textures,Sensor Noise,Objects Layout
-  libero_spatial,0.53,2402,1273,0.11,0.05,0.62,0.84,0.79,0.74,0.68
-  libero_object,0.49,2518,1234,0.09,0.04,0.58,0.81,0.76,0.71,0.65
-
-  per_suite_category_summary_long.csv
-  한 줄에 suite x category 하나입니다.
-
-  suite,category,episodes,successes,success_rate
-  libero_spatial,Camera Viewpoints,376,42,0.1117
-  libero_spatial,Robot Initial States,350,18,0.0514
-  libero_spatial,Language Instructions,390,241,0.6179
-  libero_object,Camera Viewpoints,396,37,0.0934
-
----
+```bash
 cd /data/jhshin/openpi-libero-plus
 
-CUDA_VISIBLE_DEVICES=0 \
-SERVER_CONFIG=pi05_libero_base_infer \
-SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
-PORT=8000 \
-NUM_TRIALS_PER_TASK=1 \
-./scripts/eval_libero_plus_by_suite.sh
+./scripts/setup_libero_plus_env.sh
+```
 
----
+This prepares the root `.venv`, generates `.libero-plus-config/config.yaml`, and applies the required
+`transformers_replace` patch for PyTorch checkpoints.
 
-CUDA_VISIBLE_DEVICES=0 \
-  SERVER_CONFIG=pi05_libero_base_infer \
-  SERVER_CHECKPOINT_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
-  PORT=8000 \
-  NUM_TRIALS_PER_TASK=1 \
-  bash ./scripts/eval_libero_plus_by_suite.sh
+`third_party/libero-plus/` is intentionally gitignored in the parent repo. Keep the local PyTorch 2.6 compatibility
+patch in `third_party/libero-plus/libero/libero/benchmark/__init__.py` by routing the benchmark init-state
+`torch.load(init_states_path)` calls through a helper that uses `torch.load(path, weights_only=False)`.
 
+Copy the dataset normalization stats into the config-specific assets directory:
 
-START_SERVER=0 \
-  NUM_TRIALS_PER_TASK=1 \
-  PARALLEL_JOBS=4 \
-  SUITE_PORT_MAP="libero_spatial:8000,libero_goal:8000,libero_object:8001,libero_10:8001" \
-  ./scripts/eval_libero_plus_by_suite.sh
+```bash
+cd /data/jhshin/openpi-libero-plus
 
-### 만약 하나 꺼졌을때
+mkdir -p assets/pi05_libero_plus_pvi_from_pi05_libero/physical-intelligence/libero
+cp \
+  lerobot/physical-intelligence/libero/norm_stats.json \
+  assets/pi05_libero_plus_pvi_from_pi05_libero/physical-intelligence/libero/norm_stats.json
+```
+
+Run training:
+
+```bash
+cd /data/jhshin/openpi-libero-plus
+
+CUDA_VISIBLE_DEVICES=2,3,4,5 \
+HF_LEROBOT_HOME=$PWD/lerobot \
+./.venv/bin/python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=4 \
+  scripts/train_pytorch_PVI.py pi05_libero_plus_pvi_from_pi05_libero \
+  --exp_name pi05_libero_plus_pvi_from_pi05_libero_run1 \
+  --pytorch_weight_path /data/jhshin/openpi/checkpoints/pytorch/pi05_libero
+```
+
+Notes:
+
+- `pi05_libero_plus_pvi_from_pi05_libero` uses the LIBERO-plus LeRobot schema.
+- `HF_LEROBOT_HOME` must point to `./lerobot`, not the old `/data/jhshin/openpi/datasets`.
+- `--pytorch_weight_path` is passed explicitly here so the run does not depend on a local copy under `./checkpoints/pytorch/pi05_libero`.
+- If you previously activated `/data/jhshin/openpi/.venv`, run `deactivate` first or use the explicit `./.venv/bin/python` command above.
+
+### Evaluate on LIBERO-plus Without `serve_policy.py`
+
+For long LIBERO-plus runs, local in-process evaluation is safer than websocket evaluation because there is no separate
+policy server to disconnect mid-run.
+
+One-time root-environment setup:
+
+```bash
+cd /data/jhshin/openpi-libero-plus
+
+./scripts/setup_libero_plus_env.sh
+```
+
+Run one suite locally:
+
+```bash
+cd /data/jhshin/openpi-libero-plus
+
+CUDA_VISIBLE_DEVICES=1 \
 MUJOCO_EGL_DEVICE_ID=1 \
-  START_SERVER=0 \
-  PORT=8001 \
-  PARALLEL_JOBS=1 \
-  OUTPUT_TAG=pi05_libero_spatial_retry \
-  ./scripts/eval_libero_plus_by_suite.sh libero_spatial
-  
-START_SERVER=0 \
-  PORT=8000 \
-  PARALLEL_JOBS=1 \
-  OUTPUT_TAG=pi05_libero_10_retry \
-  ./scripts/eval_libero_plus_by_suite.sh libero_10
+POLICY_CONFIG=pi05_libero_base_infer \
+POLICY_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+./scripts/eval_libero_plus_local_by_suite.sh libero_goal
+```
 
-  ---
-### 전체 한번에 (main/py)
+Run all four main suites in parallel, one suite per GPU:
+
+```bash
+cd /data/jhshin/openpi-libero-plus
+
+POLICY_CONFIG=pi05_libero_base_infer \
+POLICY_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+POLICY_PYTORCH_DEVICE=cuda:0 \
 PARALLEL_JOBS=4 \
-  SUITE_PORT_MAP="libero_10:8000,libero_spatial:8001,libero_goal:8002,libero_object:8003" \
-  ./scripts/eval_libero_plus_by_suite.sh
+SUITE_CUDA_VISIBLE_DEVICES_MAP="libero_10:0,libero_spatial:1,libero_goal:2,libero_object:3" \
+SUITE_MUJOCO_EGL_DEVICE_ID_MAP="libero_10:0,libero_spatial:1,libero_goal:2,libero_object:3" \
+./scripts/eval_libero_plus_local_by_suite.sh
+```
+
+Resume a crashed suite from task index `N`:
+
+```bash
+cd /data/jhshin/openpi-libero-plus
+
+CUDA_VISIBLE_DEVICES=1 \
+MUJOCO_EGL_DEVICE_ID=1 \
+POLICY_CONFIG=pi05_libero_base_infer \
+POLICY_DIR=/data/jhshin/openpi/checkpoints/pytorch/pi05_libero \
+TASK_START_INDEX=N \
+OUTPUT_TAG=pi05_libero_spatial_retry \
+./scripts/eval_libero_plus_local_by_suite.sh libero_spatial
+```
+
+Outputs are written under:
+
+- `data/libero_plus_eval/<output_tag>/<suite>/summary.json`
+- `data/libero_plus_eval/<output_tag>/per_suite_category_summary.json`
+- `data/libero_plus_eval/<output_tag>/per_suite_category_summary.csv`
+- `data/libero_plus_eval/<output_tag>/per_suite_category_summary_long.csv`
+
+`summary.json` is updated after each completed task, so partial progress survives process crashes.
