@@ -720,7 +720,7 @@ CUDA_VISIBLE_DEVICES=2,3,4,5 \
   uv run torchrun --standalone --nnodes=1 --nproc_per_node=4 \
   scripts/train_pytorch_PVI.py pi05_libero_pvi_from_pi05_libero
 
-CUDA_VISIBLE_DEVICES=4,5,6,7 \
+CUDA_VISIBLE_DEVICES=2,3,4,5 \
   HF_LEROBOT_HOME=/data/jhshin/openpi/datasets \
   uv run torchrun --standalone --nnodes=1 --nproc_per_node=4 \
   scripts/train_pytorch_PVI.py pi05_libero_pvi_from_base
@@ -767,25 +767,25 @@ CUDA_VISIBLE_DEVICES=5 uv run scripts/serve_policy.py \
       --policy.config pi05_libero_pvi_infer \
       --policy.dir checkpoints/pi05_libero_pvi_from_pi05_libero/pi05_libero_pvi_bs128_40k_from_pi05_libero/40000
 
-CUDA_VISIBLE_DEVICES=0 python examples/libero/main.py \
+CUDA_VISIBLE_DEVICES=2 python examples/libero/main.py \
     --args.host 127.0.0.1 \
     --args.port 8006 \
     --args.task-suite-name libero_spatial \
     --args.video_out_path None
 
-CUDA_VISIBLE_DEVICES=1 python examples/libero/main.py \
+CUDA_VISIBLE_DEVICES=3 python examples/libero/main.py \
     --args.host 127.0.0.1 \
     --args.port 8007 \
     --args.task-suite-name libero_object \
     --args.video_out_path None
 
-CUDA_VISIBLE_DEVICES=0 python examples/libero/main.py \
+CUDA_VISIBLE_DEVICES=4 python examples/libero/main.py \
     --args.host 127.0.0.1 \
     --args.port 8008 \
     --args.task-suite-name libero_goal \
     --args.video_out_path None
 
-CUDA_VISIBLE_DEVICES=1 python examples/libero/main.py \
+CUDA_VISIBLE_DEVICES=5 python examples/libero/main.py \
     --args.host 127.0.0.1 \
     --args.port 8009 \
     --args.task-suite-name libero_10 \
