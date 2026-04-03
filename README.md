@@ -51,41 +51,7 @@ GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
 
 NOTE: `GIT_LFS_SKIP_SMUDGE=1` is needed to pull LeRobot as a dependency.
 
-### LIBERO-plus Setup
-
-This fork includes a reproducible setup path for LIBERO-plus local evaluation and PyTorch PVI training. After cloning
-the repo and initializing submodules, run:
-
-```bash
-./scripts/setup_libero_plus_env.sh
-```
-
-This script:
-
-- syncs the root `.venv` with the extra LIBERO-plus dependencies
-- generates `.libero-plus-config/config.yaml` for the current clone path
-- applies the `transformers_replace` patch required for PyTorch π₀ / π₀.₅ checkpoints
-- verifies that the root environment can import the LIBERO-plus benchmark stack
-
-After the script completes, place the required data at:
-
-- LIBERO-plus assets: `third_party/libero-plus/libero/libero/assets`
-- LIBERO-plus LeRobot dataset: `lerobot/physical-intelligence/libero`
-
-`third_party/libero-plus/` is intentionally gitignored in this repo because it is a separate checkout. If you use
-PyTorch 2.6 or newer, keep the local compatibility patch in
-`third_party/libero-plus/libero/libero/benchmark/__init__.py` so LIBERO init-state files load correctly:
-
-```python
-def _load_init_states(path):
-    try:
-        return torch.load(path, weights_only=False)
-    except TypeError:
-        return torch.load(path)
-```
-
-Then replace the two `torch.load(init_states_path)` call sites in that file with
-`_load_init_states(init_states_path)`.
+For this fork's PyTorch PVI and LIBERO-plus setup, see `PVI_readme.md`.
 
 **Docker**: As an alternative to uv installation, we provide instructions for installing openpi using Docker. If you encounter issues with your system setup, consider using Docker to simplify installation. See [Docker Setup](docs/docker.md) for more details.
 
