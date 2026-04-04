@@ -21,7 +21,7 @@ class Pi0Config(_model.BaseModelConfig):
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
     use_pvi: bool = False
-    pvi_aux_encoder_type: str = "dinov2"  # "dinov2", "siglip", "hpr" 중 선택
+    pvi_aux_encoder_type: str = "dinov2"  # "dinov2", "siglip", "hpr", "clip", "r3m" 중 선택
     pvi_aux_encoder_name: str = "facebook/dinov2-base"  # 모델명 또는 HPR 체크포인트 경로
     pvi_injector_init_std: float = 0.0
 

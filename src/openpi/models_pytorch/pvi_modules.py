@@ -1,8 +1,8 @@
 import os
 import torch
 from torch import nn
-from transformers import AutoModel, SiglipVisionModel, AutoImageProcessor
-
+from transformers import AutoModel, SiglipVisionModel, AutoImageProcessor, CLIPModel
+import r3m
 
 _DINO_MEAN = (0.485, 0.456, 0.406)
 _DINO_STD = (0.229, 0.224, 0.225)
@@ -40,6 +40,26 @@ def normalize_image_to_unit_interval(image: torch.Tensor) -> torch.Tensor:
     if image_max > 1.01:
         return image / 255.0
     return image
+
+
+def normalize_image_to_255(image: torch.Tensor) -> torch.Tensor:
+    """
+    Normalize an image tensor to the [0, 255] range for R3M.
+    """
+    image_min = float(image.amin())
+    image_max = float(image.amax())
+
+    if image_min < -1.01 or image_max > 255.01:
+        raise ValueError(f"Unsupported image range for R3M preprocessing: min={image_min}, max={image_max}")
+
+    if image_min < -0.01:
+        # [-1, 1] -> [0, 255]
+        return ((image + 1.0) / 2.0) * 255.0
+    if image_max > 1.01:
+        # Already [0, 255]
+        return image
+    # [0, 1] -> [0, 255]
+    return image * 255.0
 
 
 class DinoAuxEncoder(nn.Module):
@@ -120,6 +140,108 @@ class SigLIPAuxEncoder(nn.Module):
         outputs = self.encoder(pixel_values=pixel_values)
         patch_tokens = outputs.last_hidden_state
         patches_per_view = patch_tokens.shape[1]
+        patch_tokens = patch_tokens.reshape(batch_size, num_views * patches_per_view, self.hidden_size)
+
+        return patch_tokens, patches_per_view
+
+
+class CLIPAuxEncoder(nn.Module):
+    _CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+    _CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+
+    def __init__(self, model_name: str = "openai/clip-vit-base-patch32"):
+        super().__init__()
+        self.encoder = CLIPModel.from_pretrained(model_name).vision_model
+        self.hidden_size = self.encoder.config.hidden_size
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+        
+    @torch.no_grad()
+    def forward(self, images: list[torch.Tensor]) -> tuple[torch.Tensor, int]:
+        processed = []
+        for image in images:
+            image = ensure_channels_first(image).to(dtype=torch.float32)
+            if image.shape[-2:] != (224, 224):
+                image = torch.nn.functional.interpolate(
+                    image,
+                    size=(224, 224),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            # OpenPI batches can arrive as either [-1, 1], [0, 1], or uint8-like [0, 255] floats.
+            # CLIP expects [0, 1] before normalization.
+            image = normalize_image_to_unit_interval(image)
+            mean = image.new_tensor(self._CLIP_MEAN).view(1, 3, 1, 1)
+            std = image.new_tensor(self._CLIP_STD).view(1, 3, 1, 1)
+            processed.append((image - mean) / std)
+
+        batch_size = processed[0].shape[0]
+        num_views = len(processed)
+        pixel_values = torch.stack(processed, dim=1).reshape(batch_size * num_views, 3, 224, 224)
+        outputs = self.encoder(pixel_values=pixel_values)
+        patch_tokens = outputs.last_hidden_state
+        patches_per_view = patch_tokens.shape[1]
+        patch_tokens = patch_tokens.reshape(batch_size, num_views * patches_per_view, self.hidden_size)
+
+        return patch_tokens, patches_per_view
+
+
+class R3MAuxEncoder(nn.Module):
+    def __init__(self, model_name: str = "resnet34"):
+        super().__init__()
+        self.encoder = r3m.load_r3m(modelid=model_name).module
+        if model_name == "resnet34":
+            self.hidden_size = 512
+        elif model_name == "resnet50":
+            self.hidden_size = 2048
+        
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
+    def _forward_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract feature map from ResNet before global pooling."""
+        convnet = self.encoder.convnet
+        x = convnet.conv1(x)
+        x = convnet.bn1(x)
+        x = convnet.relu(x)
+        x = convnet.maxpool(x)
+
+        x = convnet.layer1(x)
+        x = convnet.layer2(x)
+        x = convnet.layer3(x)
+        x = convnet.layer4(x)  # (B, C, 7, 7) for 224x224 input
+        return x
+
+    @torch.no_grad()
+    def forward(self, images: list[torch.Tensor]) -> tuple[torch.Tensor, int]:
+        processed = []
+        for image in images:
+            image = ensure_channels_first(image).to(dtype=torch.float32)
+            if image.shape[-2:] != (224, 224):
+                image = torch.nn.functional.interpolate(
+                    image,
+                    size=(224, 224),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+            # OpenPI batches can arrive as either [-1, 1], [0, 1], or uint8-like [0, 255] floats.
+            # R3M expects image input to be [0, 255]
+            image = normalize_image_to_255(image)
+            processed.append(image)
+
+        batch_size = processed[0].shape[0]
+        num_views = len(processed)
+        pixel_values = torch.stack(processed, dim=1).reshape(batch_size * num_views, 3, 224, 224)
+
+        # Get feature map before global pooling: (B * num_views, C, 7, 7)
+        feature_map = self._forward_features(pixel_values)
+        _, C, H, W = feature_map.shape
+
+        # Reshape to patch-like format: (B * num_views, H*W, C)
+        patch_tokens = feature_map.flatten(2).transpose(1, 2)  # (B * num_views, 49, C)
+        patches_per_view = H * W  # 49 for 224x224 input
+
+        # Reshape to (B, num_views * patches_per_view, hidden_size)
         patch_tokens = patch_tokens.reshape(batch_size, num_views * patches_per_view, self.hidden_size)
 
         return patch_tokens, patches_per_view
