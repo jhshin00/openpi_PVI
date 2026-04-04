@@ -12,6 +12,8 @@ from openpi.models_pytorch.pi0_pytorch import make_att_2d_masks
 from openpi.models_pytorch.pvi_modules import DinoAuxEncoder
 from openpi.models_pytorch.pvi_modules import SigLIPAuxEncoder
 from openpi.models_pytorch.pvi_modules import HPRAuxEncoder
+from openpi.models_pytorch.pvi_modules import CLIPAuxEncoder
+from openpi.models_pytorch.pvi_modules import R3MAuxEncoder
 from openpi.models_pytorch.pvi_modules import ZeroInitLinear
 
 logger = logging.getLogger("openpi")
@@ -122,10 +124,14 @@ class PI0PVI(PI0Pytorch):
             return SigLIPAuxEncoder(encoder_name)
         elif encoder_type == "hpr":
             return HPRAuxEncoder(encoder_name)
+        elif encoder_type == "clip":
+            return CLIPAuxEncoder(encoder_name)
+        elif encoder_type == "r3m":
+            return R3MAuxEncoder(encoder_name)
         else:
             raise ValueError(
                 f"Unknown pvi_aux_encoder_type: {encoder_type}. "
-                f"Must be one of: 'dinov2', 'siglip', 'hpr'"
+                f"Must be one of: 'dinov2', 'siglip', 'hpr', 'clip', 'r3m'"
             )
 
     @staticmethod
