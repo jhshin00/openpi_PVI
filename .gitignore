@@ -3,6 +3,7 @@ assets/
 checkpoints/
 data/
 wandb/
+hpr_checkpoints/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

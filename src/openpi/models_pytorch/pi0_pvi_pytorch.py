@@ -10,6 +10,8 @@ from transformers.models.gemma import modeling_gemma
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
 from openpi.models_pytorch.pi0_pytorch import make_att_2d_masks
 from openpi.models_pytorch.pvi_modules import DinoAuxEncoder
+from openpi.models_pytorch.pvi_modules import SigLIPAuxEncoder
+from openpi.models_pytorch.pvi_modules import HPRAuxEncoder
 from openpi.models_pytorch.pvi_modules import ZeroInitLinear
 
 logger = logging.getLogger("openpi")
@@ -53,7 +55,7 @@ class PI0PVI(PI0Pytorch):
         super().__init__(config)
         copy_branch_dtype = torch.bfloat16 if config.dtype == "bfloat16" else torch.float32
         self.injector_init_std = getattr(config, "pvi_injector_init_std", self.DEFAULT_INJECTOR_INIT_STD)
-        self.aux_encoder = DinoAuxEncoder(config.pvi_aux_encoder_name)
+        self.aux_encoder = self._create_aux_encoder(config)
         # Normalize frozen auxiliary features before projection to keep the long-prefix backward path stable.
         self.aux_input_norm = nn.LayerNorm(self.aux_encoder.hidden_size, elementwise_affine=False)
         self.aux_projector = ZeroInitLinear(
@@ -107,6 +109,24 @@ class PI0PVI(PI0Pytorch):
         for submodule in module.modules():
             if isinstance(submodule, modeling_gemma.GemmaRMSNorm):
                 submodule.to(dtype=torch.float32)
+
+    @staticmethod
+    def _create_aux_encoder(config):
+        """Auxiliary encoder를 config에 따라 생성"""
+        encoder_type = getattr(config, "pvi_aux_encoder_type", "dinov2")
+        encoder_name = config.pvi_aux_encoder_name
+
+        if encoder_type == "dinov2":
+            return DinoAuxEncoder(encoder_name)
+        elif encoder_type == "siglip":
+            return SigLIPAuxEncoder(encoder_name)
+        elif encoder_type == "hpr":
+            return HPRAuxEncoder(encoder_name)
+        else:
+            raise ValueError(
+                f"Unknown pvi_aux_encoder_type: {encoder_type}. "
+                f"Must be one of: 'dinov2', 'siglip', 'hpr'"
+            )
 
     @staticmethod
     def _tensor_rms(tensor: torch.Tensor) -> float:
