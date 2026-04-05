@@ -424,6 +424,7 @@ def populate_dataset(
             frame = {
                 "state": state[frame_index],
                 "actions": actions[frame_index],
+                "task": task,
             }
 
             for camera_name, image_array in images_per_camera.items():
@@ -436,7 +437,7 @@ def populate_dataset(
 
             dataset.add_frame(frame)
 
-        dataset.save_episode(task=task)
+        dataset.save_episode()
 
     return dataset
 
@@ -486,7 +487,6 @@ def main(
         task_mapping=task_mapping,
         episodes=episodes,
     )
-    dataset.consolidate()
 
     if push_to_hub:
         dataset.push_to_hub()

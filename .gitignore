@@ -171,3 +171,5 @@ checkpoints/
 datasets/
 data/
 *.pdf
+data_jslee/
+hpr_checkpoints/

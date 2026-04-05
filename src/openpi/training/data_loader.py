@@ -20,6 +20,38 @@ import openpi.transforms as _transforms
 T_co = TypeVar("T_co", covariant=True)
 
 
+def _ensure_hf_cache_dirs() -> None:
+    """Point Hugging Face caches to a writable repo-local location when env vars are unset."""
+    repo_root = pathlib.Path(__file__).resolve().parents[3]
+    default_hf_home = repo_root / ".cache" / "huggingface"
+
+    if "HF_HOME" not in os.environ:
+        os.environ["HF_HOME"] = str(default_hf_home)
+    if "HF_DATASETS_CACHE" not in os.environ:
+        os.environ["HF_DATASETS_CACHE"] = os.path.join(os.environ["HF_HOME"], "datasets")
+    if "HF_DATASETS_DOWNLOADED_DATASETS_PATH" not in os.environ:
+        os.environ["HF_DATASETS_DOWNLOADED_DATASETS_PATH"] = os.path.join(
+            os.environ["HF_DATASETS_CACHE"], "downloads"
+        )
+    if "HF_DATASETS_EXTRACTED_DATASETS_PATH" not in os.environ:
+        os.environ["HF_DATASETS_EXTRACTED_DATASETS_PATH"] = os.path.join(
+            os.environ["HF_DATASETS_DOWNLOADED_DATASETS_PATH"], "extracted"
+        )
+
+    pathlib.Path(os.environ["HF_HOME"]).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(os.environ["HF_DATASETS_CACHE"]).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(os.environ["HF_DATASETS_DOWNLOADED_DATASETS_PATH"]).mkdir(parents=True, exist_ok=True)
+    pathlib.Path(os.environ["HF_DATASETS_EXTRACTED_DATASETS_PATH"]).mkdir(parents=True, exist_ok=True)
+
+    # `datasets.config` caches these paths at import time, so update them explicitly too.
+    import datasets
+
+    datasets.config.HF_CACHE_HOME = os.environ["HF_HOME"]
+    datasets.config.HF_DATASETS_CACHE = pathlib.Path(os.environ["HF_DATASETS_CACHE"])
+    datasets.config.DOWNLOADED_DATASETS_PATH = pathlib.Path(os.environ["HF_DATASETS_DOWNLOADED_DATASETS_PATH"])
+    datasets.config.EXTRACTED_DATASETS_PATH = pathlib.Path(os.environ["HF_DATASETS_EXTRACTED_DATASETS_PATH"])
+
+
 class Dataset(Protocol[T_co]):
     """Interface for a dataset with random access."""
 
@@ -132,6 +164,7 @@ def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
     """Create a dataset for training."""
+    _ensure_hf_cache_dirs()
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")

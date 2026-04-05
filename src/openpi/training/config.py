@@ -964,23 +964,30 @@ _CONFIGS = [
             assets=AssetsConfig(assets_dir="./assets/pi05_ur3_pvi"),
             base_config=DataConfig(prompt_from_task=True),
         ),
+        # Match the effective number of sampled training windows rather than only raw episode count.
+        # UR3 here has ~20.2k usable action-horizon windows (61 episodes, mean length ~340, horizon=10).
+        # With batch_size=32, 1.2k steps yields ~38.4k sampled windows, i.e. ~1.9 dataset passes.
+        # That is in the same ballpark as the LIBERO default (30k steps for 1692 episodes with
+        # roughly 250-400 frames per episode -> about 1.5x-2.4x effective passes).
         lr_schedule=_optimizer.CosineDecaySchedule(
-            warmup_steps=3_000,
-            peak_lr=2.5e-5,
-            decay_steps=30_000,
-            decay_lr=2.5e-6,
+            warmup_steps=120,
+            peak_lr=1.5e-5,
+            decay_steps=1_200,
+            decay_lr=1.5e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="./checkpoints/pytorch/pi05_base",
-        num_train_steps=30_000,
+        num_train_steps=1_200,
         batch_size=32,
-        log_interval=100,
-        save_interval=1000,
-        keep_period=5000,
+        log_interval=20,
+        save_interval=200,
+        keep_period=1_000,
         overwrite=False,
         resume=False,
+        wandb_enabled=True,
+        exp_name="pi05_pvi_ur3_pnp3",
     ),
     TrainConfig(
         name="pi05_ur3_pvi_infer",
