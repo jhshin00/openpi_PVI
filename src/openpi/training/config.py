@@ -989,7 +989,7 @@ _CONFIGS = [
         overwrite=False,
         resume=False,
         wandb_enabled=True,
-        exp_name="pi05_ur3_pvi_dinov2_1p6k",
+        exp_name="pi05_ur3_pvi_dinov2_pnp_1600",
     ),
     TrainConfig(
         name="pi05_ur3_pvi_dinov2",
@@ -1026,7 +1026,7 @@ _CONFIGS = [
         overwrite=False,
         resume=False,
         wandb_enabled=True,
-        exp_name="pi05_ur3_pvi_dinov2_1p6k",
+        exp_name="pi05_ur3_pvi_dinov2_pnp_1600",
     ),
     TrainConfig(
         name="pi05_ur3_pvi_siglip",
@@ -1063,7 +1063,7 @@ _CONFIGS = [
         overwrite=False,
         resume=False,
         wandb_enabled=True,
-        exp_name="pi05_ur3_pvi_siglip_1p6k",
+        exp_name="pi05_ur3_pvi_siglip_pnp_1600",
     ),
     TrainConfig(
         name="pi05_ur3_pvi_hpr",
@@ -1100,7 +1100,7 @@ _CONFIGS = [
         overwrite=False,
         resume=False,
         wandb_enabled=True,
-        exp_name="pi05_ur3_pvi_hpr_1p6k",
+        exp_name="pi05_ur3_pvi_hpr_pnp_1600",
     ),
     TrainConfig(
         name="pi05_ur3_pvi_infer",

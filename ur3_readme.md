@@ -224,3 +224,16 @@ Still environment-specific on your side:
 - success criteria in `info`
 - camera serial assignment / crop tuning for your setup
 - any task-specific reset routine beyond the default joint reset
+
+
+DINO:
+
+CUDA_VISIBLE_DEVICES=0 \
+HF_LEROBOT_HOME=/data/jhshin/openpi/datasets \
+uv run scripts/train_pytorch_PVI.py pi05_ur3_pvi_dinov2
+
+HPR:
+
+CUDA_VISIBLE_DEVICES=1 \
+HF_LEROBOT_HOME=/data/jhshin/openpi/datasets \
+uv run scripts/train_pytorch_PVI.py pi05_ur3_pvi_hpr
