@@ -27,7 +27,7 @@ class UR3Env(Protocol):
 
 @dataclasses.dataclass
 class Args:
-    policy_config: str = "pi05_ur3_pvi_infer"
+    policy_config: str = "pi05_ur3_pvi_dinov2_infer"
     policy_dir: str = tyro.MISSING
     default_prompt: str | None = None
     prompt: str | None = None

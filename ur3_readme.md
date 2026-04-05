@@ -122,13 +122,21 @@ and writes stats to:
 
 UR3 `pi0.5` training is wired as a PVI run.
 
-Primary config:
+Base config:
 
 ```text
 pi05_ur3_pvi
 ```
 
-Default assumptions in the integrated config:
+Named encoder presets:
+
+```text
+pi05_ur3_pvi_dinov2
+pi05_ur3_pvi_siglip
+pi05_ur3_pvi_hpr
+```
+
+Current defaults in the integrated config:
 
 - base model: `pi05_base`
 - action horizon: `10`
@@ -136,21 +144,39 @@ Default assumptions in the integrated config:
 - `discrete_state_input=False`
 - local dataset root: `./datasets`
 - dataset repo id: `ur3_dataset`
+- training steps: `1600`
+- batch size: `32`
 
-Example:
+Base config with CLI override:
 
 ```bash
 uv run scripts/train_pytorch_PVI.py pi05_ur3_pvi \
-  --exp_name pi05_ur3_pvi_run1
+  --exp-name pi05_ur3_pvi_run1 \
+  --model.pvi-aux-encoder-type dinov2 \
+  --model.pvi-aux-encoder-name facebook/dinov2-base
+```
+
+Encoder preset examples:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+HF_LEROBOT_HOME=/data/jhshin/openpi/datasets \
+uv run scripts/train_pytorch_PVI.py pi05_ur3_pvi_dinov2
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+HF_LEROBOT_HOME=/data/jhshin/openpi/datasets \
+uv run scripts/train_pytorch_PVI.py pi05_ur3_pvi_hpr
 ```
 
 If the dataset location or repo id differs, override them from CLI:
 
 ```bash
 uv run scripts/train_pytorch_PVI.py pi05_ur3_pvi \
-  --exp_name pi05_ur3_pvi_run1 \
-  --data.repo_id my_ur3_dataset \
-  --data.lerobot_root /path/to/datasets
+  --exp-name pi05_ur3_pvi_run1 \
+  --data.repo-id my_ur3_dataset \
+  --data.lerobot-root /path/to/datasets
 ```
 
 ## 5. Single-Process Eval
@@ -180,25 +206,50 @@ The built-in runtime supports:
 
 The built-in env expects two RealSense cameras. If you do not pass serials, it uses the first detected camera as `base` and the second as `wrist`.
 
-Example with the built-in direct UR3 runtime:
+Dedicated eval configs:
+
+```text
+pi05_ur3_pvi_dinov2_infer
+pi05_ur3_pvi_hpr_infer
+```
+
+`--policy-dir` must point to the exact numbered checkpoint directory that contains `model.safetensors`.
+For the current 1600-step configs, the default final checkpoint directory is the `1600` subdirectory.
+
+DINO eval example:
 
 ```bash
 uv run examples/ur3/main.py \
-  --policy-config pi05_ur3_pvi_infer \
-  --policy-dir ./checkpoints/pi05_ur3_pvi/pi05_ur3_pvi_run1/30000 \
+  --policy-config pi05_ur3_pvi_dinov2_infer \
+  --policy-dir ./checkpoints/pi05_ur3_pvi_dinov2/pi05_ur3_pvi_dinov2_pnp_1600/1600 \
   --robot-mode direct \
   --robot-ip 192.168.5.102 \
   --default-prompt "pick up the object" \
   --replan-steps 5 \
-  --max-steps 200
+  --max-steps 200 \
+  --pytorch-device cuda:0
+```
+
+HPR eval example:
+
+```bash
+uv run examples/ur3/main.py \
+  --policy-config pi05_ur3_pvi_hpr_infer \
+  --policy-dir ./checkpoints/pi05_ur3_pvi_hpr/pi05_ur3_pvi_hpr_pnp_1600/1600 \
+  --robot-mode direct \
+  --robot-ip 192.168.5.102 \
+  --default-prompt "pick up the object" \
+  --replan-steps 5 \
+  --max-steps 200 \
+  --pytorch-device cuda:0
 ```
 
 If you still want to provide a custom env factory:
 
 ```bash
 uv run examples/ur3/main.py \
-  --policy-config pi05_ur3_pvi_infer \
-  --policy-dir ./checkpoints/pi05_ur3_pvi/pi05_ur3_pvi_run1/30000 \
+  --policy-config pi05_ur3_pvi_dinov2_infer \
+  --policy-dir ./checkpoints/pi05_ur3_pvi_dinov2/pi05_ur3_pvi_dinov2_pnp_1600/1600 \
   --env-factory your_package.your_env:create_env \
   --env-kwargs-json '{"robot_ip":"192.168.0.10"}' \
   --replan-steps 5 \
@@ -210,7 +261,39 @@ uv run examples/ur3/main.py \
 - `(obs, reward, done, info)`
 - `(obs, reward, terminated, truncated, info)`
 
-## 6. Current Scope
+## 6. Robot PC Requirements
+
+Required files and directories on the robot-connected machine:
+
+- the `ur3` branch codebase, including `examples/ur3/main.py`, `examples/ur3/real_env.py`, and `src/openpi/...`
+- the exact checkpoint step directory passed as `--policy-dir`
+- the checkpoint's `model.safetensors`
+- the checkpoint's `assets/ur3_dataset/...` norm stats
+- `_external/gello_software` if you use the built-in direct or zmq UR3 runtime
+- `hpr_checkpoints/hpr_fullfinetune_base_lang_trace_negative_mod.ckpt` for HPR eval
+
+Runtime dependencies and hardware:
+
+- `pyrealsense2` for RealSense cameras
+- `opencv-python` for image resize/color conversion
+- 2 RealSense color cameras, unless running with `--mock`
+- access to the UR3 robot via `gello` direct mode or the `zmq` robot server
+- a prompt via `--prompt` or `--default-prompt`
+
+Model asset requirements:
+
+- DINO eval needs access to the `facebook/dinov2-base` Hugging Face weights
+- HPR eval needs the local HPR checkpoint above and also access to the DINOv2 backbone weights used inside HPR
+- if the robot PC has no internet access, pre-populate the Hugging Face cache there before evaluation
+
+Notes:
+
+- the default built-in `gello_root` is `./_external/gello_software`
+- if your gello checkout lives elsewhere, pass `--gello-root /path/to/gello_software`
+- if camera autodiscovery is unstable, pass both `--base-camera-serial` and `--wrist-camera-serial`
+- if you copied only `model.safetensors` without checkpoint `assets`, eval will fall back to config assets only if `./assets/pi05_ur3_pvi/ur3_dataset` exists locally
+
+## 7. Current Scope
 
 Integrated now:
 
@@ -224,16 +307,3 @@ Still environment-specific on your side:
 - success criteria in `info`
 - camera serial assignment / crop tuning for your setup
 - any task-specific reset routine beyond the default joint reset
-
-
-DINO:
-
-CUDA_VISIBLE_DEVICES=0 \
-HF_LEROBOT_HOME=/data/jhshin/openpi/datasets \
-uv run scripts/train_pytorch_PVI.py pi05_ur3_pvi_dinov2
-
-HPR:
-
-CUDA_VISIBLE_DEVICES=1 \
-HF_LEROBOT_HOME=/data/jhshin/openpi/datasets \
-uv run scripts/train_pytorch_PVI.py pi05_ur3_pvi_hpr

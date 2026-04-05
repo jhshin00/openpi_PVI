@@ -2,7 +2,6 @@ import os
 import torch
 from torch import nn
 from transformers import AutoModel, SiglipVisionModel, AutoImageProcessor, CLIPModel
-import r3m
 
 _DINO_MEAN = (0.485, 0.456, 0.406)
 _DINO_STD = (0.229, 0.224, 0.225)
@@ -189,11 +188,21 @@ class CLIPAuxEncoder(nn.Module):
 class R3MAuxEncoder(nn.Module):
     def __init__(self, model_name: str = "resnet34"):
         super().__init__()
+        try:
+            import r3m
+        except ImportError as exc:
+            raise ImportError(
+                "R3M auxiliary encoder requires the optional `r3m` package. "
+                "Install it or choose a different pvi_aux_encoder_type."
+            ) from exc
+
         self.encoder = r3m.load_r3m(modelid=model_name).module
         if model_name == "resnet34":
             self.hidden_size = 512
         elif model_name == "resnet50":
             self.hidden_size = 2048
+        else:
+            raise ValueError(f"Unsupported R3M model_name: {model_name}")
         
         for param in self.encoder.parameters():
             param.requires_grad = False
