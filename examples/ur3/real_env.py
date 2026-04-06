@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 import sys
 import threading
 import time
@@ -77,6 +78,7 @@ class _AsyncCamera:
         driver: _RealSenseDriver,
         *,
         target_size: tuple[int, int],
+        crop_box: tuple[int, int, int, int] | None,
         crop_center: tuple[int, int] | None,
         crop_size: tuple[int, int],
     ) -> None:
@@ -88,6 +90,7 @@ class _AsyncCamera:
         self._cv2 = cv2
         self._driver = driver
         self._target_size = target_size
+        self._crop_box = crop_box
         self._crop_center = crop_center
         self._crop_size = crop_size
         self._frame: np.ndarray | None = None
@@ -97,6 +100,17 @@ class _AsyncCamera:
         self._thread.start()
 
     def _crop(self, frame: np.ndarray) -> np.ndarray:
+        if self._crop_box is not None:
+            # Keep compatibility with the data-collection script's (x1, x2, y1, y2) crop_box convention.
+            x1, x2, y1, y2 = self._crop_box
+            x1 = max(int(x1), 0)
+            x2 = min(int(x2), frame.shape[1])
+            y1 = max(int(y1), 0)
+            y2 = min(int(y2), frame.shape[0])
+            if x1 >= x2 or y1 >= y2:
+                raise ValueError(f"Invalid crop_box {self._crop_box} for frame shape {frame.shape}")
+            return frame[y1:y2, x1:x2]
+
         if self._crop_center is None:
             return frame
 
@@ -165,6 +179,13 @@ def _discover_camera_serials(base_serial: str | None, wrist_serial: str | None) 
     if resolved_base == resolved_wrist:
         raise ValueError("base and wrist camera serials must be different")
 
+    logging.info(
+        "Resolved RealSense serials: base=%s wrist=%s available=%s",
+        resolved_base,
+        resolved_wrist,
+        available_serials,
+    )
+
     return resolved_base, resolved_wrist
 
 
@@ -175,7 +196,7 @@ class OpenPIUR3Env:
     robot_ip: str = "192.168.5.102"
     hostname: str = "127.0.0.1"
     robot_port: int = 6001
-    hz: int = 25
+    hz: int = 30
     prompt: str | None = None
     image_size: int = 224
     camera_width: int = 640
@@ -183,7 +204,9 @@ class OpenPIUR3Env:
     camera_fps: int = 30
     base_camera_serial: str | None = None
     wrist_camera_serial: str | None = None
-    base_crop_center: tuple[int, int] | None = (200, 260)
+    base_crop_box: tuple[int, int, int, int] | None = (0, 500, 0, 480)
+    wrist_crop_box: tuple[int, int, int, int] | None = None
+    base_crop_center: tuple[int, int] | None = None
     wrist_crop_center: tuple[int, int] | None = None
     crop_size: tuple[int, int] = (400, 400)
     kp: float = 8.0
@@ -240,6 +263,13 @@ class OpenPIUR3Env:
     def _create_cameras(self) -> dict[str, _AsyncCamera]:
         base_serial, wrist_serial = _discover_camera_serials(self.base_camera_serial, self.wrist_camera_serial)
         target_size = (self.image_size, self.image_size)
+        logging.info(
+            "Resolved camera crops: base_crop_box=%s base_crop_center=%s wrist_crop_box=%s wrist_crop_center=%s",
+            self.base_crop_box,
+            self.base_crop_center,
+            self.wrist_crop_box,
+            self.wrist_crop_center,
+        )
 
         return {
             "base": _AsyncCamera(
@@ -250,6 +280,7 @@ class OpenPIUR3Env:
                     fps=self.camera_fps,
                 ),
                 target_size=target_size,
+                crop_box=self.base_crop_box,
                 crop_center=self.base_crop_center,
                 crop_size=self.crop_size,
             ),
@@ -261,6 +292,7 @@ class OpenPIUR3Env:
                     fps=self.camera_fps,
                 ),
                 target_size=target_size,
+                crop_box=self.wrist_crop_box,
                 crop_center=self.wrist_crop_center,
                 crop_size=self.crop_size,
             ),

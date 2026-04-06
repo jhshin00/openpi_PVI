@@ -49,14 +49,16 @@ class Args:
     robot_ip: str = "192.168.5.102"
     hostname: str = "127.0.0.1"
     robot_port: int = 6001
-    hz: int = 25
+    hz: int = 30
     image_size: int = 224
     camera_width: int = 640
     camera_height: int = 480
     camera_fps: int = 30
     base_camera_serial: str | None = None
     wrist_camera_serial: str | None = None
-    base_crop_center: tuple[int, int] | None = (200, 260)
+    base_crop_box: tuple[int, int, int, int] | None = (0, 500, 0, 480)
+    wrist_crop_box: tuple[int, int, int, int] | None = None
+    base_crop_center: tuple[int, int] | None = None
     wrist_crop_center: tuple[int, int] | None = None
     crop_size: tuple[int, int] = (400, 400)
     kp: float = 8.0
@@ -162,6 +164,8 @@ def _create_builtin_env(args: Args) -> UR3Env:
         camera_fps=args.camera_fps,
         base_camera_serial=args.base_camera_serial,
         wrist_camera_serial=args.wrist_camera_serial,
+        base_crop_box=args.base_crop_box,
+        wrist_crop_box=args.wrist_crop_box,
         base_crop_center=args.base_crop_center,
         wrist_crop_center=args.wrist_crop_center,
         crop_size=args.crop_size,
