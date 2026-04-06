@@ -6,6 +6,7 @@ import json
 import logging
 import pathlib
 import sys
+import threading
 from typing import Any, Protocol
 
 import imageio.v2 as imageio
@@ -38,6 +39,9 @@ class Args:
     video_out_dir: str | None = None
     debug_action_stats: bool = False
     debug_log_every: int = 1
+    async_replan: bool = True
+    prefetch_threshold: int = 10
+    hold_last_action_while_prefetch: bool = True
 
     # Optional override if you want to provide a custom env factory instead of the built-in UR3 env.
     env_factory: str | None = None
@@ -138,6 +142,71 @@ def _get_frame(obs: dict[str, Any]) -> np.ndarray:
     return image
 
 
+def _copy_policy_observation(policy_obs: dict[str, Any]) -> dict[str, Any]:
+    copied: dict[str, Any] = {}
+    for key, value in policy_obs.items():
+        if isinstance(value, np.ndarray):
+            copied[key] = np.array(value, copy=True)
+        else:
+            copied[key] = value
+    return copied
+
+
+class _PolicyPrefetcher:
+    def __init__(self, policy: _policy.Policy, replan_steps: int) -> None:
+        self._policy = policy
+        self._replan_steps = replan_steps
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._result: dict[str, Any] | None = None
+
+    def has_inflight(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def start(self, policy_obs: dict[str, Any]) -> bool:
+        with self._lock:
+            if self._result is not None:
+                return False
+            if self._thread is not None and self._thread.is_alive():
+                return False
+
+            obs_snapshot = _copy_policy_observation(policy_obs)
+
+            def run_prefetch() -> None:
+                result: dict[str, Any]
+                try:
+                    policy_result = self._policy.infer(obs_snapshot)
+                    result = {
+                        "policy_obs": obs_snapshot,
+                        "policy_result": policy_result,
+                        "action_chunk": np.asarray(policy_result["actions"][: self._replan_steps], dtype=np.float32),
+                    }
+                except Exception as exc:  # pragma: no cover - best-effort runtime path
+                    result = {"error": exc}
+
+                with self._lock:
+                    self._result = result
+
+            self._thread = threading.Thread(target=run_prefetch, daemon=True)
+            self._thread.start()
+            return True
+
+    def take_ready(self) -> dict[str, Any] | None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return None
+            result = self._result
+            if result is None:
+                return None
+            self._result = None
+            self._thread = None
+
+        if "error" in result:
+            raise result["error"]
+        return result
+
+
 def create_policy(args: Args) -> _policy.Policy:
     config = _config.get_config(args.policy_config)
     return _policy_config.create_trained_policy(
@@ -210,7 +279,9 @@ def run(args: Args) -> None:
                     "A prompt is required for UR3 evaluation. Pass --prompt/--default-prompt or return one from env.reset()."
                 )
             action_plan: collections.deque[np.ndarray] = collections.deque()
+            prefetcher = _PolicyPrefetcher(policy, args.replan_steps)
             frames = [] if video_dir is not None else None
+            last_action: np.ndarray | None = None
 
             if frames is not None:
                 frames.append(_get_frame(obs))
@@ -218,16 +289,61 @@ def run(args: Args) -> None:
             success = False
             for step in range(args.max_steps):
                 if not action_plan:
-                    policy_obs = _to_policy_observation(obs, prompt)
-                    policy_result = policy.infer(policy_obs)
-                    action_chunk = policy_result["actions"]
-                    if len(action_chunk) < args.replan_steps:
-                        raise ValueError(
-                            f"replan_steps={args.replan_steps} but policy only predicted {len(action_chunk)} actions"
-                        )
+                    prefetched = prefetcher.take_ready() if args.async_replan else None
+
+                    if prefetched is not None:
+                        policy_obs = prefetched["policy_obs"]
+                        policy_result = prefetched["policy_result"]
+                        chunk = prefetched["action_chunk"]
+                    else:
+                        if args.async_replan and args.hold_last_action_while_prefetch and last_action is not None and prefetcher.has_inflight():
+                            obs, reward, done, info = _normalize_step(env.step(np.asarray(last_action)))
+                            success = bool(info.get("success", done))
+                            logging.info(
+                                "episode=%d step=%d reward=%s done=%s success=%s holding_last_action=True",
+                                episode_index,
+                                step,
+                                reward,
+                                done,
+                                success,
+                            )
+
+                            if args.debug_action_stats and step % max(args.debug_log_every, 1) == 0:
+                                current = np.asarray(info.get("current_joint_positions", []), dtype=np.float32)
+                                target = np.asarray(info.get("target_action", []), dtype=np.float32)
+                                err = np.asarray(info.get("joint_error", []), dtype=np.float32)
+                                qd = np.asarray(info.get("joint_velocity_cmd", []), dtype=np.float32)
+                                if current.size and target.size and err.size and qd.size:
+                                    logging.info(
+                                        "control step=%d current=%s target=%s err=%s qd=%s "
+                                        "max_abs_err=%.5f max_abs_qd=%.5f",
+                                        step,
+                                        np.array2string(current, precision=4, suppress_small=True),
+                                        np.array2string(target, precision=4, suppress_small=True),
+                                        np.array2string(err, precision=4, suppress_small=True),
+                                        np.array2string(qd, precision=4, suppress_small=True),
+                                        float(np.max(np.abs(err[:6]))),
+                                        float(np.max(np.abs(qd[:6]))),
+                                    )
+
+                            if frames is not None:
+                                frames.append(_get_frame(obs))
+
+                            if done:
+                                break
+                            continue
+
+                        policy_obs = _to_policy_observation(obs, prompt)
+                        policy_result = policy.infer(policy_obs)
+                        action_chunk = policy_result["actions"]
+                        if len(action_chunk) < args.replan_steps:
+                            raise ValueError(
+                                f"replan_steps={args.replan_steps} but policy only predicted {len(action_chunk)} actions"
+                            )
+                        chunk = np.asarray(action_chunk[: args.replan_steps], dtype=np.float32)
+
                     if args.debug_action_stats:
                         current_state = np.asarray(policy_obs["observation/state"], dtype=np.float32)
-                        chunk = np.asarray(action_chunk[: args.replan_steps], dtype=np.float32)
                         joint_delta = chunk[:, :6] - current_state[None, :6]
                         logging.info(
                             "policy_chunk step=%d infer_ms=%.2f "
@@ -240,9 +356,21 @@ def run(args: Args) -> None:
                             float(np.max(np.abs(joint_delta))),
                             float(np.mean(np.abs(joint_delta))),
                         )
-                    action_plan.extend(np.asarray(action_chunk[: args.replan_steps]))
 
-                obs, reward, done, info = _normalize_step(env.step(np.asarray(action_plan.popleft())))
+                    action_plan.extend(chunk)
+                    if args.async_replan and len(action_plan) <= args.prefetch_threshold:
+                        prefetch_started = prefetcher.start(_to_policy_observation(obs, prompt))
+                        if prefetch_started:
+                            logging.info(
+                                "episode=%d step=%d started_async_replan=True actions_left=%d",
+                                episode_index,
+                                step,
+                                len(action_plan),
+                            )
+
+                next_action = np.asarray(action_plan.popleft(), dtype=np.float32)
+                last_action = next_action
+                obs, reward, done, info = _normalize_step(env.step(next_action))
                 success = bool(info.get("success", done))
 
                 logging.info(
@@ -271,6 +399,11 @@ def run(args: Args) -> None:
                             float(np.max(np.abs(err[:6]))),
                             float(np.max(np.abs(qd[:6]))),
                         )
+
+                if args.async_replan and len(action_plan) <= args.prefetch_threshold:
+                    prefetch_started = prefetcher.start(_to_policy_observation(obs, prompt))
+                    if prefetch_started:
+                        logging.info("episode=%d step=%d started_async_replan=True actions_left=%d", episode_index, step, len(action_plan))
 
                 if frames is not None:
                     frames.append(_get_frame(obs))
