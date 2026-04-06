@@ -214,6 +214,7 @@ class OpenPIUR3Env:
     max_joint_velocity: float = 1.5
     max_joint_accel: float = 10.0
     speedj_accel: float = 10.0
+    target_smoothing_alpha: float = 1.0
     reset_joints_deg: tuple[float, ...] | None = (0.0, -90.0, -90.0, -90.0, 90.0, 90.0)
     reset_gripper: float = 0.0
     reset_steps: int = 120
@@ -226,9 +227,12 @@ class OpenPIUR3Env:
             raise ValueError("hz must be positive")
         if self.reset_joints_deg is not None and len(self.reset_joints_deg) != 6:
             raise ValueError("reset_joints_deg must contain exactly 6 joint angles")
+        if not (0.0 < self.target_smoothing_alpha <= 1.0):
+            raise ValueError("target_smoothing_alpha must be in the interval (0, 1].")
 
         self._control_dt = 1.0 / float(self.hz)
         self._last_qd = np.zeros(6, dtype=np.float32)
+        self._last_target_action: np.ndarray | None = None
         self._next_step_time: float | None = None
         self._zero_image = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
         self._cameras: dict[str, _AsyncCamera] = {}
@@ -362,7 +366,9 @@ class OpenPIUR3Env:
         if self._reset_target is not None:
             self._move_to_reset()
 
-        obs = self._format_obs(self._read_raw_obs())
+        raw_obs = self._read_raw_obs()
+        self._last_target_action = raw_obs["joint_positions"].copy()
+        obs = self._format_obs(raw_obs)
         info = {"prompt": self.prompt} if self.prompt is not None else {}
         return obs, info
 
@@ -372,7 +378,18 @@ class OpenPIUR3Env:
             raise ValueError(f"Expected a 7D UR3 action, got shape {action.shape}")
 
         current = self._read_raw_obs()["joint_positions"]
-        err = action[:6] - current[:6]
+        target_action = action.copy()
+        if self.target_smoothing_alpha < 1.0:
+            if self._last_target_action is None:
+                self._last_target_action = current.copy()
+            target_action[:6] = (
+                (1.0 - self.target_smoothing_alpha) * self._last_target_action[:6]
+                + self.target_smoothing_alpha * action[:6]
+            )
+            target_action[6] = action[6]
+        self._last_target_action = target_action.copy()
+
+        err = target_action[:6] - current[:6]
         err[np.abs(err) < self.deadband] = 0.0
 
         qd = self.kp * err
@@ -383,13 +400,14 @@ class OpenPIUR3Env:
         qd = self._last_qd + qd_delta
         self._last_qd = qd
 
-        self._robot.command_joint_velocity(qd, a=self.speedj_accel, t=self._control_dt, gripper=float(action[6]))
+        self._robot.command_joint_velocity(qd, a=self.speedj_accel, t=self._control_dt, gripper=float(target_action[6]))
         self._sleep_to_rate()
 
         raw_obs = self._read_raw_obs()
         info = {
             "current_joint_positions": current.copy(),
-            "target_action": action.copy(),
+            "requested_action": action.copy(),
+            "target_action": target_action.copy(),
             "joint_error": err.copy(),
             "joint_velocity_cmd": qd.copy(),
         }
