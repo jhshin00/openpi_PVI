@@ -356,7 +356,9 @@ class OpenPIUR3Env:
 
         raw_obs = self._read_raw_obs()
         info = {
+            "current_joint_positions": current.copy(),
             "target_action": action.copy(),
+            "joint_error": err.copy(),
             "joint_velocity_cmd": qd.copy(),
         }
         return self._format_obs(raw_obs), 0.0, False, info

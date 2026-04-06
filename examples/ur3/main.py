@@ -36,6 +36,8 @@ class Args:
     num_episodes: int = 1
     pytorch_device: str | None = None
     video_out_dir: str | None = None
+    debug_action_stats: bool = False
+    debug_log_every: int = 1
 
     # Optional override if you want to provide a custom env factory instead of the built-in UR3 env.
     env_factory: str | None = None
@@ -213,10 +215,26 @@ def run(args: Args) -> None:
             for step in range(args.max_steps):
                 if not action_plan:
                     policy_obs = _to_policy_observation(obs, prompt)
-                    action_chunk = policy.infer(policy_obs)["actions"]
+                    policy_result = policy.infer(policy_obs)
+                    action_chunk = policy_result["actions"]
                     if len(action_chunk) < args.replan_steps:
                         raise ValueError(
                             f"replan_steps={args.replan_steps} but policy only predicted {len(action_chunk)} actions"
+                        )
+                    if args.debug_action_stats:
+                        current_state = np.asarray(policy_obs["observation/state"], dtype=np.float32)
+                        chunk = np.asarray(action_chunk[: args.replan_steps], dtype=np.float32)
+                        joint_delta = chunk[:, :6] - current_state[None, :6]
+                        logging.info(
+                            "policy_chunk step=%d infer_ms=%.2f "
+                            "first_target=%s first_delta=%s "
+                            "chunk_max_abs_delta=%.5f chunk_mean_abs_delta=%.5f",
+                            step,
+                            float(policy_result.get("policy_timing", {}).get("infer_ms", -1.0)),
+                            np.array2string(chunk[0], precision=4, suppress_small=True),
+                            np.array2string(joint_delta[0], precision=4, suppress_small=True),
+                            float(np.max(np.abs(joint_delta))),
+                            float(np.mean(np.abs(joint_delta))),
                         )
                     action_plan.extend(np.asarray(action_chunk[: args.replan_steps]))
 
@@ -231,6 +249,24 @@ def run(args: Args) -> None:
                     done,
                     success,
                 )
+
+                if args.debug_action_stats and step % max(args.debug_log_every, 1) == 0:
+                    current = np.asarray(info.get("current_joint_positions", []), dtype=np.float32)
+                    target = np.asarray(info.get("target_action", []), dtype=np.float32)
+                    err = np.asarray(info.get("joint_error", []), dtype=np.float32)
+                    qd = np.asarray(info.get("joint_velocity_cmd", []), dtype=np.float32)
+                    if current.size and target.size and err.size and qd.size:
+                        logging.info(
+                            "control step=%d current=%s target=%s err=%s qd=%s "
+                            "max_abs_err=%.5f max_abs_qd=%.5f",
+                            step,
+                            np.array2string(current, precision=4, suppress_small=True),
+                            np.array2string(target, precision=4, suppress_small=True),
+                            np.array2string(err, precision=4, suppress_small=True),
+                            np.array2string(qd, precision=4, suppress_small=True),
+                            float(np.max(np.abs(err[:6]))),
+                            float(np.max(np.abs(qd[:6]))),
+                        )
 
                 if frames is not None:
                     frames.append(_get_frame(obs))
