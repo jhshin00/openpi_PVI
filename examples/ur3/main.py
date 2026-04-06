@@ -64,9 +64,9 @@ class Args:
     crop_size: tuple[int, int] = (400, 400)
     kp: float = 8.0
     deadband: float = 0.003
-    max_joint_velocity: float = 1.5
-    max_joint_accel: float = 10.0
-    speedj_accel: float = 10.0
+    max_joint_velocity: float = 1.0
+    max_joint_accel: float = 1.0
+    speedj_accel: float = 1.0
     target_smoothing_alpha: float = 1.0
     reset_joints_deg: tuple[float, ...] | None = (0.0, -90.0, -90.0, -90.0, 90.0, 90.0)
     reset_gripper: float = 0.0
