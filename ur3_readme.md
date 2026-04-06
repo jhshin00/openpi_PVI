@@ -79,10 +79,25 @@ uv run examples/ur3/convert_ur3_data_to_lerobot.py \
   --fps 30
 ```
 
-This creates a local LeRobot dataset at:
+For a downsampled UR3 dataset, keep `--fps 30` and add a frame stride.
+For example, the current recommended compromise experiment is:
+
+```bash
+uv run examples/ur3/convert_ur3_data_to_lerobot.py \
+  --raw-dir ./datasets/ur3_raw \
+  --repo-id ur3_dataset_15hz \
+  --root ./datasets \
+  --mode video \
+  --dataset-config.fps 30 \
+  --dataset-config.frame-stride 2
+```
+
+This produces a 15 Hz dataset from the original 30 Hz captures.
+
+The downsampled example above creates a local LeRobot dataset at:
 
 ```text
-./datasets/ur3_dataset
+./datasets/ur3_dataset_15hz
 ```
 
 The converted dataset stores:
@@ -104,6 +119,12 @@ Compute UR3 normalization statistics before training:
 
 ```bash
 uv run scripts/compute_norm_stats.py --config-name pi05_ur3_pvi
+```
+
+For the recommended 15 Hz + 50-step experiment, run:
+
+```bash
+uv run scripts/compute_norm_stats.py --config-name pi05_ur3_pvi_dinov2_15hz_h50
 ```
 
 With the default config, this reads from:
@@ -146,6 +167,15 @@ Current defaults in the integrated config:
 - dataset repo id: `ur3_dataset`
 - training steps: `1600`
 - batch size: `32`
+
+Additional UR3 experiment configs are available for a 15 Hz dataset plus a longer horizon:
+
+- `pi05_ur3_pvi_dinov2_15hz_h50`
+- `pi05_ur3_pvi_dinov2_15hz_h50_infer`
+- `pi05_ur3_pvi_siglip_15hz_h50`
+- `pi05_ur3_pvi_siglip_15hz_h50_infer`
+- `pi05_ur3_pvi_hpr_15hz_h50`
+- `pi05_ur3_pvi_hpr_15hz_h50_infer`
 
 Base config with CLI override:
 

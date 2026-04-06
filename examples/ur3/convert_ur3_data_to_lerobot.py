@@ -35,6 +35,9 @@ uv run examples/ur3/convert_ur3_data_to_lerobot.py \
   --root ./datasets \
   --fps 30
 
+To create a downsampled dataset, keep `fps` at the raw capture rate and increase
+`frame_stride`. For example, `fps=30, frame_stride=2` writes a 15 Hz dataset.
+
 If the raw episodes are stored as:
 
 ./datasets/ur3/pick_and_place/pick_up_the_pear/0403_153000/data.hdf5
@@ -74,11 +77,23 @@ GELLO_CAMERA_KEYS = {
 @dataclasses.dataclass(frozen=True)
 class DatasetConfig:
     fps: int = 30
+    frame_stride: int = 1
     use_videos: bool = True
     tolerance_s: float = 0.0001
     image_writer_processes: int = 10
     image_writer_threads: int = 5
     video_backend: str | None = None
+
+    @property
+    def output_fps(self) -> int:
+        if self.frame_stride <= 0:
+            raise ValueError("frame_stride must be positive")
+        if self.fps % self.frame_stride != 0:
+            raise ValueError(
+                f"fps={self.fps} must be divisible by frame_stride={self.frame_stride} "
+                "so the converted dataset has an integer FPS."
+            )
+        return self.fps // self.frame_stride
 
 
 DEFAULT_DATASET_CONFIG = DatasetConfig()
@@ -322,7 +337,7 @@ def create_empty_dataset(
 
     return LeRobotDataset.create(
         repo_id=repo_id,
-        fps=dataset_config.fps,
+        fps=dataset_config.output_fps,
         root=target_dir,
         robot_type=robot_type,
         features=features,
@@ -341,37 +356,41 @@ def load_raw_episode_data(
     *,
     default_task: str | None,
     task_mapping: dict[str, str],
+    dataset_config: DatasetConfig,
 ) -> tuple[dict[str, np.ndarray], torch.Tensor, torch.Tensor, str, torch.Tensor | None, torch.Tensor | None]:
     image_keys = LEGACY_CAMERA_KEYS if episode_format == "legacy" else GELLO_CAMERA_KEYS
+    frame_slice = slice(None, None, dataset_config.frame_stride)
 
     with h5py.File(episode_path, "r") as episode:
         if episode_format == "gello":
-            state = torch.from_numpy(episode["/data/joint_positions"][:].astype(np.float32))
-            actions = torch.from_numpy(episode["/data/joint_actions"][:].astype(np.float32))
+            state = torch.from_numpy(episode["/data/joint_positions"][frame_slice].astype(np.float32))
+            actions = torch.from_numpy(episode["/data/joint_actions"][frame_slice].astype(np.float32))
 
             velocity = None
             for key in ("/data/joint_velocities", "/data/qvel"):
                 if key in episode:
-                    velocity = torch.from_numpy(episode[key][:].astype(np.float32))
+                    velocity = torch.from_numpy(episode[key][frame_slice].astype(np.float32))
                     break
 
             effort = None
             if "/data/effort" in episode:
-                effort = torch.from_numpy(episode["/data/effort"][:].astype(np.float32))
+                effort = torch.from_numpy(episode["/data/effort"][frame_slice].astype(np.float32))
         else:
-            state = torch.from_numpy(episode["/observation/qpos"][:].astype(np.float32))
-            actions = torch.from_numpy(episode["/action"][:].astype(np.float32))
+            state = torch.from_numpy(episode["/observation/qpos"][frame_slice].astype(np.float32))
+            actions = torch.from_numpy(episode["/action"][frame_slice].astype(np.float32))
 
             velocity = None
             if "/observation/qvel" in episode:
-                velocity = torch.from_numpy(episode["/observation/qvel"][:].astype(np.float32))
+                velocity = torch.from_numpy(episode["/observation/qvel"][frame_slice].astype(np.float32))
 
             effort = None
             if "/observation/effort" in episode:
-                effort = torch.from_numpy(episode["/observation/effort"][:].astype(np.float32))
+                effort = torch.from_numpy(episode["/observation/effort"][frame_slice].astype(np.float32))
 
         images_per_camera = {
-            camera_name: _load_images(episode[key]) for camera_name, key in image_keys.items() if key in episode
+            camera_name: _load_images(episode[key])[frame_slice]
+            for camera_name, key in image_keys.items()
+            if key in episode
         }
         missing_cameras = set(CAMERAS) - set(images_per_camera)
         if missing_cameras:
@@ -405,6 +424,7 @@ def populate_dataset(
     *,
     default_task: str | None,
     task_mapping: dict[str, str],
+    dataset_config: DatasetConfig,
     episodes: list[int] | None = None,
 ) -> LeRobotDataset:
     if episodes is None:
@@ -418,6 +438,7 @@ def populate_dataset(
             episode_format,
             default_task=default_task,
             task_mapping=task_mapping,
+            dataset_config=dataset_config,
         )
 
         for frame_index in range(state.shape[0]):
@@ -485,6 +506,7 @@ def main(
         episode_format,
         default_task=default_task,
         task_mapping=task_mapping,
+        dataset_config=dataset_config,
         episodes=episodes,
     )
 
