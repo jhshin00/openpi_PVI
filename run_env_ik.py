@@ -132,7 +132,7 @@ class Args:
     gello_port: Optional[str] = None
     mock: bool = False
     use_save_interface: bool = True
-    data_dir: str = "/ssd1/data_pi0.5/pick_and_place"
+    data_dir: str = "/ssd1/pi0.5_PVI_datasets/pick_and_place"
     bimanual: bool = False
     verbose: bool = False
     cut_frames: bool = False # Only needed when you want to save a fixed number of frames 
@@ -240,7 +240,7 @@ def main(args):
             # "wrist": ZMQClientCamera(port=args.wrist_camera_port, host=args.hostname),
             # "base": ZMQClientCamera(port=args.base_camera_port, host=args.hostname),
 
-            "base": AsyncCamera(client1, crop_box=(0, 500, 0, 480)),
+            "base": AsyncCamera(client1, crop_box=(0, 550, 0, 480)),
             "wrist": AsyncCamera(client2),
         }
         robot_client = ZMQClientRobot(port=args.robot_port, host=args.hostname)
