@@ -8,6 +8,7 @@ import pathlib
 from queue import Empty
 from queue import Full
 from queue import Queue
+import re
 import sys
 import threading
 from typing import Any, Literal, Protocol
@@ -20,9 +21,7 @@ from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
 from openpi.training import config as _config
 
-DEFAULT_VIDEO_OUT_DIR = pathlib.Path(
-    "/data/jhshin/openpi/video/pi05_ur3_pvi_hpr_h50/pi05_ur3_pvi_hpr_h50_new_data_0407"
-)
+DEFAULT_VIDEO_ROOT = pathlib.Path("/data/jhshin/openpi/video")
 
 
 class UR3Env(Protocol):
@@ -268,14 +267,37 @@ def _create_env(args: Args) -> UR3Env:
     return env_factory(**env_kwargs)
 
 
-def _resolve_video_dir(args: Args) -> pathlib.Path | None:
+def _slugify_path_component(value: str, *, fallback: str, max_length: int = 80) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    if not slug:
+        return fallback
+    if len(slug) <= max_length:
+        return slug
+    return slug[:max_length].rstrip("_") or fallback
+
+
+def _policy_video_dirname(policy_config: str) -> str:
+    return _slugify_path_component(policy_config.removesuffix("_infer"), fallback="policy")
+
+
+def _checkpoint_video_dirname(policy_dir: str) -> str:
+    checkpoint_path = pathlib.Path(policy_dir)
+    if checkpoint_path.name.isdigit() and checkpoint_path.parent.name:
+        return _slugify_path_component(checkpoint_path.parent.name, fallback="checkpoint")
+    return _slugify_path_component(checkpoint_path.name, fallback="checkpoint")
+
+
+def _prompt_video_dirname(prompt: str) -> str:
+    return _slugify_path_component(prompt, fallback="task")
+
+
+def _resolve_video_dir(args: Args, *, prompt: str | None) -> pathlib.Path | None:
     if args.save_video == "off":
         return None
     if args.video_out_dir is not None:
         return pathlib.Path(args.video_out_dir)
-    if args.save_video == "on":
-        return DEFAULT_VIDEO_OUT_DIR
-    return None
+    prompt_dir = _prompt_video_dirname(prompt) if prompt is not None else "task"
+    return DEFAULT_VIDEO_ROOT / _policy_video_dirname(args.policy_config) / _checkpoint_video_dirname(args.policy_dir) / prompt_dir
 
 
 def _normalize_video_filename(video_filename: str) -> pathlib.Path:
@@ -311,16 +333,21 @@ def run(args: Args) -> None:
     policy = create_policy(args)
     env = _create_env(args)
 
-    video_dir = _resolve_video_dir(args)
-    if video_dir is not None:
-        video_dir.mkdir(parents=True, exist_ok=True)
+    if args.save_video == "off":
+        logging.info("video_saving=disabled")
+    elif args.video_out_dir is not None:
         logging.info(
             "video_saving=enabled video_dir=%s video_filename=%s",
-            video_dir,
+            pathlib.Path(args.video_out_dir),
             args.video_filename or "<auto>",
         )
     else:
-        logging.info("video_saving=disabled")
+        logging.info(
+            "video_saving=enabled video_dir_root=%s policy=%s checkpoint=%s prompt=<auto>",
+            DEFAULT_VIDEO_ROOT,
+            _policy_video_dirname(args.policy_config),
+            _checkpoint_video_dirname(args.policy_dir),
+        )
 
     if args.replan_steps <= 0:
         raise ValueError("replan_steps must be positive")
@@ -374,6 +401,16 @@ def run(args: Args) -> None:
             if prompt is None:
                 raise ValueError(
                     "A prompt is required for UR3 evaluation. Pass --prompt/--default-prompt or return one from env.reset()."
+                )
+            video_dir = _resolve_video_dir(args, prompt=prompt)
+            if video_dir is not None:
+                video_dir.mkdir(parents=True, exist_ok=True)
+                logging.info(
+                    "episode=%d video_dir=%s video_filename=%s prompt=%s",
+                    episode_index,
+                    video_dir,
+                    args.video_filename or "<auto>",
+                    prompt,
                 )
             action_plan: collections.deque[np.ndarray] = collections.deque()
             frames = [] if video_dir is not None else None
