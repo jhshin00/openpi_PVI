@@ -38,6 +38,10 @@ uv run examples/ur3/convert_ur3_data_to_lerobot.py \
 To create a downsampled dataset, keep `fps` at the raw capture rate and increase
 `frame_stride`. For example, `fps=30, frame_stride=2` writes a 15 Hz dataset.
 
+By default, gello / `run_env_ik.py` episodes use the next retained joint state as
+the absolute action target. Pass `--dataset-config.gello-action-source joint_actions`
+to keep the recorded joint command instead.
+
 If the raw episodes are stored as:
 
 ./datasets/ur3/pick_and_place/pick_up_the_pear/0403_153000/data.hdf5
@@ -78,6 +82,7 @@ GELLO_CAMERA_KEYS = {
 class DatasetConfig:
     fps: int = 30
     frame_stride: int = 1
+    gello_action_source: Literal["next_state", "joint_actions"] = "next_state"
     use_videos: bool = True
     tolerance_s: float = 0.0001
     image_writer_processes: int = 10
@@ -403,6 +408,22 @@ def load_raw_episode_data(
             default_task=default_task,
             task_mapping=task_mapping,
         )
+
+    if episode_format == "gello" and dataset_config.gello_action_source == "next_state":
+        if state.shape[0] < 2:
+            raise ValueError(
+                f"Need at least 2 frames to derive next-state actions from {episode_path}, got {state.shape[0]}"
+            )
+
+        # `run_env_ik.py` stores observations after the control step. Using the next retained state as the
+        # absolute action keeps each observation aligned with the action that produced the subsequent pose.
+        actions = state[1:].clone()
+        state = state[:-1]
+        images_per_camera = {camera_name: images[:-1] for camera_name, images in images_per_camera.items()}
+        if velocity is not None:
+            velocity = velocity[:-1]
+        if effort is not None:
+            effort = effort[:-1]
 
     expected_frames = state.shape[0]
     if actions.shape[0] != expected_frames:

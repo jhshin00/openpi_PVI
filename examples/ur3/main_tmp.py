@@ -5,11 +5,7 @@ import importlib.util
 import json
 import logging
 import pathlib
-from queue import Empty
-from queue import Full
-from queue import Queue
 import sys
-import threading
 from typing import Any, Protocol
 
 import imageio.v2 as imageio
@@ -35,17 +31,14 @@ class Args:
     policy_dir: str = tyro.MISSING
     default_prompt: str | None = None
     prompt: str | None = None
-    replan_steps: int = 8
-    async_inference: bool = True
-    async_prefetch_steps: int = 6
-    async_plan_guard_steps: int = 1
+    replan_steps: int = 5
     max_steps: int = 200
     num_episodes: int = 1
     pytorch_device: str | None = None
     video_out_dir: str | None = None
     debug_action_stats: bool = False
     debug_log_every: int = 1
-    chunk_execution: str = "chunk_endpoint"
+    chunk_execution: str = "per_step"
 
     # Optional override if you want to provide a custom env factory instead of the built-in UR3 env.
     env_factory: str | None = None
@@ -69,12 +62,12 @@ class Args:
     base_crop_center: tuple[int, int] | None = None
     wrist_crop_center: tuple[int, int] | None = None
     crop_size: tuple[int, int] = (400, 400)
-    kp: float = 10.0
+    kp: float = 8.0
     deadband: float = 0.003
-    max_joint_velocity: float = 0.35
-    max_joint_accel: float = 0.8
-    speedj_accel: float = 0.8
-    target_smoothing_alpha: float = 0.2
+    max_joint_velocity: float = 1.0
+    max_joint_accel: float = 1.0
+    speedj_accel: float = 1.0
+    target_smoothing_alpha: float = 1.0
     reset_joints_deg: tuple[float, ...] | None = (0.0, -90.0, -90.0, -90.0, 90.0, 90.0)
     reset_gripper: float = 0.0
     reset_steps: int = 120
@@ -165,48 +158,6 @@ def _build_action_plan(chunk: np.ndarray, current_state: np.ndarray, mode: str) 
     raise ValueError(f"Unsupported chunk_execution: {mode}")
 
 
-def _current_state_from_obs(obs: dict[str, Any]) -> np.ndarray:
-    return np.asarray(_first_present(obs, "observation/state", "state"), dtype=np.float32)
-
-
-def _extract_action_window(
-    actions: np.ndarray,
-    *,
-    start: int,
-    size: int,
-    strict_size: bool,
-) -> np.ndarray:
-    if actions.ndim != 2:
-        raise ValueError(f"Expected a 2D action chunk, got shape {actions.shape}")
-    if strict_size and len(actions) < start + size:
-        raise ValueError(f"Need {start + size} actions but policy only predicted {len(actions)}")
-    return np.asarray(actions[start : start + size], dtype=np.float32)
-
-
-def _replace_action_plan(
-    action_plan: collections.deque[np.ndarray],
-    new_plan: np.ndarray,
-    *,
-    guard_steps: int,
-) -> None:
-    preserved = []
-    preserve_count = min(max(guard_steps, 0), len(action_plan))
-    for _ in range(preserve_count):
-        preserved.append(np.asarray(action_plan.popleft(), dtype=np.float32))
-
-    action_plan.clear()
-    action_plan.extend(preserved)
-    action_plan.extend(np.asarray(action, dtype=np.float32) for action in new_plan)
-
-
-def _drain_queue(q: Queue) -> None:
-    while True:
-        try:
-            q.get_nowait()
-        except Empty:
-            return
-
-
 def create_policy(args: Args) -> _policy.Policy:
     config = _config.get_config(args.policy_config)
     return _policy_config.create_trained_policy(
@@ -270,50 +221,6 @@ def run(args: Args) -> None:
     if video_dir is not None:
         video_dir.mkdir(parents=True, exist_ok=True)
 
-    if args.replan_steps <= 0:
-        raise ValueError("replan_steps must be positive")
-    if args.async_prefetch_steps < 0:
-        raise ValueError("async_prefetch_steps must be non-negative")
-    if args.async_plan_guard_steps < 0:
-        raise ValueError("async_plan_guard_steps must be non-negative")
-
-    inference_queue: Queue[tuple[int, dict[str, Any]]] | None = None
-    result_queue: Queue[tuple[int, dict[str, Any]]] | None = None
-    error_queue: Queue[BaseException] | None = None
-    stop_event: threading.Event | None = None
-    infer_thread: threading.Thread | None = None
-
-    if args.async_inference:
-        inference_queue = Queue(maxsize=1)
-        result_queue = Queue(maxsize=1)
-        error_queue = Queue(maxsize=1)
-        stop_event = threading.Event()
-
-        def inference_worker() -> None:
-            assert inference_queue is not None
-            assert result_queue is not None
-            assert error_queue is not None
-            assert stop_event is not None
-
-            while not stop_event.is_set():
-                try:
-                    request_step, request_obs = inference_queue.get(timeout=0.1)
-                except Empty:
-                    continue
-
-                try:
-                    policy_result = policy.infer(request_obs)
-                    _drain_queue(result_queue)
-                    result_queue.put_nowait((request_step, policy_result))
-                except Exception as exc:
-                    logging.exception("Inference worker failed at step=%d", request_step)
-                    _drain_queue(error_queue)
-                    error_queue.put_nowait(exc)
-                    return
-
-        infer_thread = threading.Thread(target=inference_worker, name="ur3-policy-infer", daemon=True)
-        infer_thread.start()
-
     total_successes = 0
     try:
         for episode_index in range(args.num_episodes):
@@ -325,137 +232,44 @@ def run(args: Args) -> None:
                 )
             action_plan: collections.deque[np.ndarray] = collections.deque()
             frames = [] if video_dir is not None else None
-            pending_request_step: int | None = None
-            hold_steps = 0
 
             if frames is not None:
                 frames.append(_get_frame(obs))
 
             success = False
             for step in range(args.max_steps):
-                if args.async_inference:
-                    assert inference_queue is not None
-                    assert result_queue is not None
-                    assert error_queue is not None
-                    assert infer_thread is not None
-
-                    try:
-                        worker_exc = error_queue.get_nowait()
-                    except Empty:
-                        worker_exc = None
-                    if worker_exc is not None:
-                        raise RuntimeError("Inference worker failed.") from worker_exc
-                    if not infer_thread.is_alive():
-                        raise RuntimeError("Inference worker thread stopped unexpectedly.")
-
-                    try:
-                        request_step, policy_result = result_queue.get_nowait()
-                    except Empty:
-                        policy_result = None
-                    else:
-                        pending_request_step = None
-                        delay_steps = max(step - request_step, 0)
-                        current_state = _current_state_from_obs(obs)
-                        raw_actions = np.asarray(policy_result["actions"], dtype=np.float32)
-                        raw_chunk = _extract_action_window(
-                            raw_actions,
-                            start=delay_steps,
-                            size=args.replan_steps,
-                            strict_size=False,
+                if not action_plan:
+                    policy_obs = _to_policy_observation(obs, prompt)
+                    policy_result = policy.infer(policy_obs)
+                    action_chunk = policy_result["actions"]
+                    if len(action_chunk) < args.replan_steps:
+                        raise ValueError(
+                            f"replan_steps={args.replan_steps} but policy only predicted {len(action_chunk)} actions"
                         )
-                        if len(raw_chunk) == 0:
-                            logging.warning(
-                                "Dropping stale policy result at step=%d: delay_steps=%d chunk_len=%d",
-                                step,
-                                delay_steps,
-                                len(raw_actions),
-                            )
-                        else:
-                            chunk = _build_action_plan(raw_chunk, current_state, args.chunk_execution)
-                            _replace_action_plan(
-                                action_plan,
-                                chunk,
-                                guard_steps=args.async_plan_guard_steps,
-                            )
+                    raw_chunk = np.asarray(action_chunk[: args.replan_steps], dtype=np.float32)
+                    current_state = np.asarray(policy_obs["observation/state"], dtype=np.float32)
+                    chunk = _build_action_plan(raw_chunk, current_state, args.chunk_execution)
 
-                            if args.debug_action_stats:
-                                joint_delta = chunk[:, :6] - current_state[None, :6]
-                                logging.info(
-                                    "policy_chunk step=%d req_step=%d delay_steps=%d infer_ms=%.2f plan_mode=%s "
-                                    "first_target=%s last_target=%s first_delta=%s last_delta=%s "
-                                    "chunk_max_abs_delta=%.5f chunk_mean_abs_delta=%.5f queue_len=%d",
-                                    step,
-                                    request_step,
-                                    delay_steps,
-                                    float(policy_result.get("policy_timing", {}).get("infer_ms", -1.0)),
-                                    args.chunk_execution,
-                                    np.array2string(chunk[0], precision=4, suppress_small=True),
-                                    np.array2string(chunk[-1], precision=4, suppress_small=True),
-                                    np.array2string(joint_delta[0], precision=4, suppress_small=True),
-                                    np.array2string(joint_delta[-1], precision=4, suppress_small=True),
-                                    float(np.max(np.abs(joint_delta))),
-                                    float(np.mean(np.abs(joint_delta))),
-                                    len(action_plan),
-                                )
-
-                    if pending_request_step is None and len(action_plan) <= args.async_prefetch_steps:
-                        policy_obs = _to_policy_observation(obs, prompt)
-                        try:
-                            inference_queue.put_nowait((step, policy_obs))
-                        except Full:
-                            pass
-                        else:
-                            pending_request_step = step
-
-                else:
-                    if not action_plan:
-                        policy_obs = _to_policy_observation(obs, prompt)
-                        policy_result = policy.infer(policy_obs)
-                        raw_actions = np.asarray(policy_result["actions"], dtype=np.float32)
-                        raw_chunk = _extract_action_window(
-                            raw_actions,
-                            start=0,
-                            size=args.replan_steps,
-                            strict_size=True,
-                        )
-                        current_state = _current_state_from_obs(obs)
-                        chunk = _build_action_plan(raw_chunk, current_state, args.chunk_execution)
-
-                        if args.debug_action_stats:
-                            joint_delta = chunk[:, :6] - current_state[None, :6]
-                            logging.info(
-                                "policy_chunk step=%d infer_ms=%.2f plan_mode=%s "
-                                "first_target=%s last_target=%s first_delta=%s last_delta=%s "
-                                "chunk_max_abs_delta=%.5f chunk_mean_abs_delta=%.5f",
-                                step,
-                                float(policy_result.get("policy_timing", {}).get("infer_ms", -1.0)),
-                                args.chunk_execution,
-                                np.array2string(chunk[0], precision=4, suppress_small=True),
-                                np.array2string(chunk[-1], precision=4, suppress_small=True),
-                                np.array2string(joint_delta[0], precision=4, suppress_small=True),
-                                np.array2string(joint_delta[-1], precision=4, suppress_small=True),
-                                float(np.max(np.abs(joint_delta))),
-                                float(np.mean(np.abs(joint_delta))),
-                            )
-
-                        action_plan.extend(chunk)
-
-                if action_plan:
-                    action = np.asarray(action_plan.popleft(), dtype=np.float32)
-                    hold_steps = 0
-                else:
-                    # Keep tracking the measured current pose while waiting for a fresh plan.
-                    action = _current_state_from_obs(obs).copy()
-                    hold_steps += 1
-                    if args.debug_action_stats and hold_steps % max(args.debug_log_every, 1) == 0:
+                    if args.debug_action_stats:
+                        joint_delta = chunk[:, :6] - current_state[None, :6]
                         logging.info(
-                            "holding_current_pose step=%d hold_steps=%d pending_request=%s",
+                            "policy_chunk step=%d infer_ms=%.2f plan_mode=%s "
+                            "first_target=%s last_target=%s first_delta=%s last_delta=%s "
+                            "chunk_max_abs_delta=%.5f chunk_mean_abs_delta=%.5f",
                             step,
-                            hold_steps,
-                            pending_request_step,
+                            float(policy_result.get("policy_timing", {}).get("infer_ms", -1.0)),
+                            args.chunk_execution,
+                            np.array2string(chunk[0], precision=4, suppress_small=True),
+                            np.array2string(chunk[-1], precision=4, suppress_small=True),
+                            np.array2string(joint_delta[0], precision=4, suppress_small=True),
+                            np.array2string(joint_delta[-1], precision=4, suppress_small=True),
+                            float(np.max(np.abs(joint_delta))),
+                            float(np.mean(np.abs(joint_delta))),
                         )
 
-                obs, reward, done, info = _normalize_step(env.step(action))
+                    action_plan.extend(chunk)
+
+                obs, reward, done, info = _normalize_step(env.step(np.asarray(action_plan.popleft())))
                 success = bool(info.get("success", done))
 
                 logging.info(
@@ -499,10 +313,6 @@ def run(args: Args) -> None:
 
         logging.info("success_rate=%.3f", total_successes / max(args.num_episodes, 1))
     finally:
-        if stop_event is not None:
-            stop_event.set()
-        if infer_thread is not None:
-            infer_thread.join(timeout=1.0)
         close_fn = getattr(env, "close", None)
         if callable(close_fn):
             close_fn()

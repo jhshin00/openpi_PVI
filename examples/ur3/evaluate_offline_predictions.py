@@ -16,7 +16,9 @@ class Args:
     policy_config: str
     checkpoint_dir: str
     pytorch_device: str | None = "cpu"
-    pairs_per_task: int = 2
+    episodes_per_task: int = 1
+    pairs_per_episode: int = 2
+    pairs_per_task: int | None = None
 
 
 def _first_present(data: dict[str, Any], *keys: str):
@@ -47,40 +49,56 @@ def _load_episode_meta(dataset_root: pathlib.Path) -> list[dict[str, Any]]:
     return episodes
 
 
+def _select_candidate_positions(window_count: int, num_samples: int) -> list[int]:
+    if window_count <= 0 or num_samples <= 0:
+        return []
+    positions = np.linspace(0, window_count - 1, num=min(num_samples, window_count))
+    return [int(pos) for pos in np.unique(np.round(positions).astype(int))]
+
+
 def _select_eval_pair_starts(
-    episodes: list[dict[str, Any]], action_horizon: int, pairs_per_task: int
+    episodes: list[dict[str, Any]],
+    action_horizon: int,
+    episodes_per_task: int,
+    pairs_per_episode: int,
 ) -> tuple[list[int], list[dict[str, Any]]]:
     starts = []
     selected = []
     cumulative = 0
-    seen_tasks = set()
+    episode_entries_by_task: dict[str, list[dict[str, Any]]] = {}
 
     for episode in episodes:
         task = episode["tasks"][0]
-        if task in seen_tasks:
-            cumulative += episode["length"]
-            continue
-
         length = int(episode["length"])
-        valid_pair_count = length - action_horizon
-        if valid_pair_count <= 0:
-            cumulative += length
-            continue
-
-        candidate_positions = np.linspace(0, valid_pair_count - 1, num=min(pairs_per_task, valid_pair_count))
-        candidate_positions = np.unique(np.round(candidate_positions).astype(int))
-
-        starts.extend((cumulative + int(pos)) for pos in candidate_positions)
-        selected.append(
+        episode_entries_by_task.setdefault(task, []).append(
             {
-                "episode_index": int(episode["episode_index"]),
-                "task": task,
+                "episode": episode,
                 "length": length,
-                "pair_local_indices": [int(pos) for pos in candidate_positions],
+                "global_start": cumulative,
             }
         )
-        seen_tasks.add(task)
         cumulative += length
+
+    for task, task_entries in episode_entries_by_task.items():
+        valid_entries = [entry for entry in task_entries if entry["length"] - action_horizon > 0]
+        selected_episode_positions = _select_candidate_positions(len(valid_entries), episodes_per_task)
+
+        for task_episode_position in selected_episode_positions:
+            entry = valid_entries[task_episode_position]
+            episode = entry["episode"]
+            valid_pair_count = entry["length"] - action_horizon
+            candidate_positions = _select_candidate_positions(valid_pair_count, pairs_per_episode)
+
+            starts.extend(entry["global_start"] + pos for pos in candidate_positions)
+            selected.append(
+                {
+                    "episode_index": int(episode["episode_index"]),
+                    "task": task,
+                    "length": entry["length"],
+                    "task_episode_position": int(task_episode_position),
+                    "pair_local_indices": candidate_positions,
+                }
+            )
 
     return starts, selected
 
@@ -90,6 +108,14 @@ def _to_numpy(x):
 
 
 def main(args: Args) -> None:
+    if args.episodes_per_task < 1:
+        raise ValueError("--episodes-per-task must be >= 1")
+
+    # Keep the old flag working for existing commands.
+    resolved_pairs_per_episode = args.pairs_per_task if args.pairs_per_task is not None else args.pairs_per_episode
+    if resolved_pairs_per_episode < 1:
+        raise ValueError("--pairs-per-episode must be >= 1")
+
     train_config = _config.get_config(args.policy_config)
     policy = _policy_config.create_trained_policy(
         train_config,
@@ -103,7 +129,10 @@ def main(args: Args) -> None:
     episodes = _load_episode_meta(dataset_root)
 
     pair_starts, selected_episodes = _select_eval_pair_starts(
-        episodes, train_config.model.action_horizon, args.pairs_per_task
+        episodes,
+        train_config.model.action_horizon,
+        args.episodes_per_task,
+        resolved_pairs_per_episode,
     )
     eval_indices = sorted({idx for base in pair_starts for idx in (base, base + 1)})
 
@@ -145,6 +174,8 @@ def main(args: Args) -> None:
         "checkpoint_dir": str(pathlib.Path(args.checkpoint_dir).resolve()),
         "dataset_repo_id": data_config.repo_id,
         "action_horizon": train_config.model.action_horizon,
+        "episodes_per_task": args.episodes_per_task,
+        "pairs_per_episode": resolved_pairs_per_episode,
         "num_eval_windows": len(eval_indices),
         "num_overlap_pairs": len(pair_starts),
         "selected_episodes": selected_episodes,
