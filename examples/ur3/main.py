@@ -329,6 +329,14 @@ def _resolve_video_path(
     return video_dir / f"{filename.stem}_episode_{episode_index:04d}{filename.suffix}"
 
 
+def _write_video(video_path: pathlib.Path, frames: list[np.ndarray], *, fps: int) -> None:
+    if not frames:
+        logging.warning("Skipping empty video buffer: %s", video_path)
+        return
+    imageio.mimwrite(video_path, frames, fps=max(fps, 1))
+    logging.info("saved_video=%s num_frames=%d", video_path, len(frames))
+
+
 def run(args: Args) -> None:
     policy = create_policy(args)
     env = _create_env(args)
@@ -412,70 +420,122 @@ def run(args: Args) -> None:
                     args.video_filename or "<auto>",
                     prompt,
                 )
+                video_path = _resolve_video_path(
+                    video_dir,
+                    video_filename=args.video_filename,
+                    episode_index=episode_index,
+                    num_episodes=args.num_episodes,
+                )
+            else:
+                video_path = None
             action_plan: collections.deque[np.ndarray] = collections.deque()
             frames = [] if video_dir is not None else None
             pending_request_step: int | None = None
             hold_steps = 0
-
-            if frames is not None:
-                frames.append(_get_frame(obs))
+            step = -1
 
             success = False
-            for step in range(args.max_steps):
-                if args.async_inference:
-                    assert inference_queue is not None
-                    assert result_queue is not None
-                    assert error_queue is not None
-                    assert infer_thread is not None
+            pending_exception: BaseException | None = None
+            try:
+                if frames is not None:
+                    frames.append(_get_frame(obs))
 
-                    try:
-                        worker_exc = error_queue.get_nowait()
-                    except Empty:
-                        worker_exc = None
-                    if worker_exc is not None:
-                        raise RuntimeError("Inference worker failed.") from worker_exc
-                    if not infer_thread.is_alive():
-                        raise RuntimeError("Inference worker thread stopped unexpectedly.")
+                for step in range(args.max_steps):
+                    if args.async_inference:
+                        assert inference_queue is not None
+                        assert result_queue is not None
+                        assert error_queue is not None
+                        assert infer_thread is not None
 
-                    try:
-                        request_step, policy_result = result_queue.get_nowait()
-                    except Empty:
-                        policy_result = None
-                    else:
-                        pending_request_step = None
-                        delay_steps = max(step - request_step, 0)
-                        current_state = _current_state_from_obs(obs)
-                        raw_actions = np.asarray(policy_result["actions"], dtype=np.float32)
-                        raw_chunk = _extract_action_window(
-                            raw_actions,
-                            start=delay_steps,
-                            size=args.replan_steps,
-                            strict_size=False,
-                        )
-                        if len(raw_chunk) == 0:
-                            logging.warning(
-                                "Dropping stale policy result at step=%d: delay_steps=%d chunk_len=%d",
-                                step,
-                                delay_steps,
-                                len(raw_actions),
-                            )
+                        try:
+                            worker_exc = error_queue.get_nowait()
+                        except Empty:
+                            worker_exc = None
+                        if worker_exc is not None:
+                            raise RuntimeError("Inference worker failed.") from worker_exc
+                        if not infer_thread.is_alive():
+                            raise RuntimeError("Inference worker thread stopped unexpectedly.")
+
+                        try:
+                            request_step, policy_result = result_queue.get_nowait()
+                        except Empty:
+                            policy_result = None
                         else:
-                            chunk = _build_action_plan(raw_chunk, current_state, args.chunk_execution)
-                            _replace_action_plan(
-                                action_plan,
-                                chunk,
-                                guard_steps=args.async_plan_guard_steps,
+                            pending_request_step = None
+                            delay_steps = max(step - request_step, 0)
+                            current_state = _current_state_from_obs(obs)
+                            raw_actions = np.asarray(policy_result["actions"], dtype=np.float32)
+                            raw_chunk = _extract_action_window(
+                                raw_actions,
+                                start=delay_steps,
+                                size=args.replan_steps,
+                                strict_size=False,
                             )
+                            if len(raw_chunk) == 0:
+                                logging.warning(
+                                    "Dropping stale policy result at step=%d: delay_steps=%d chunk_len=%d",
+                                    step,
+                                    delay_steps,
+                                    len(raw_actions),
+                                )
+                            else:
+                                chunk = _build_action_plan(raw_chunk, current_state, args.chunk_execution)
+                                _replace_action_plan(
+                                    action_plan,
+                                    chunk,
+                                    guard_steps=args.async_plan_guard_steps,
+                                )
+
+                                if args.debug_action_stats:
+                                    joint_delta = chunk[:, :6] - current_state[None, :6]
+                                    logging.info(
+                                        "policy_chunk step=%d req_step=%d delay_steps=%d infer_ms=%.2f plan_mode=%s "
+                                        "first_target=%s last_target=%s first_delta=%s last_delta=%s "
+                                        "chunk_max_abs_delta=%.5f chunk_mean_abs_delta=%.5f queue_len=%d",
+                                        step,
+                                        request_step,
+                                        delay_steps,
+                                        float(policy_result.get("policy_timing", {}).get("infer_ms", -1.0)),
+                                        args.chunk_execution,
+                                        np.array2string(chunk[0], precision=4, suppress_small=True),
+                                        np.array2string(chunk[-1], precision=4, suppress_small=True),
+                                        np.array2string(joint_delta[0], precision=4, suppress_small=True),
+                                        np.array2string(joint_delta[-1], precision=4, suppress_small=True),
+                                        float(np.max(np.abs(joint_delta))),
+                                        float(np.mean(np.abs(joint_delta))),
+                                        len(action_plan),
+                                    )
+
+                        if pending_request_step is None and len(action_plan) <= args.async_prefetch_steps:
+                            policy_obs = _to_policy_observation(obs, prompt)
+                            try:
+                                inference_queue.put_nowait((step, policy_obs))
+                            except Full:
+                                pass
+                            else:
+                                pending_request_step = step
+
+                    else:
+                        if not action_plan:
+                            policy_obs = _to_policy_observation(obs, prompt)
+                            policy_result = policy.infer(policy_obs)
+                            raw_actions = np.asarray(policy_result["actions"], dtype=np.float32)
+                            raw_chunk = _extract_action_window(
+                                raw_actions,
+                                start=0,
+                                size=args.replan_steps,
+                                strict_size=True,
+                            )
+                            current_state = _current_state_from_obs(obs)
+                            chunk = _build_action_plan(raw_chunk, current_state, args.chunk_execution)
 
                             if args.debug_action_stats:
                                 joint_delta = chunk[:, :6] - current_state[None, :6]
                                 logging.info(
-                                    "policy_chunk step=%d req_step=%d delay_steps=%d infer_ms=%.2f plan_mode=%s "
+                                    "policy_chunk step=%d infer_ms=%.2f plan_mode=%s "
                                     "first_target=%s last_target=%s first_delta=%s last_delta=%s "
-                                    "chunk_max_abs_delta=%.5f chunk_mean_abs_delta=%.5f queue_len=%d",
+                                    "chunk_max_abs_delta=%.5f chunk_mean_abs_delta=%.5f",
                                     step,
-                                    request_step,
-                                    delay_steps,
                                     float(policy_result.get("policy_timing", {}).get("infer_ms", -1.0)),
                                     args.chunk_execution,
                                     np.array2string(chunk[0], precision=4, suppress_small=True),
@@ -484,113 +544,79 @@ def run(args: Args) -> None:
                                     np.array2string(joint_delta[-1], precision=4, suppress_small=True),
                                     float(np.max(np.abs(joint_delta))),
                                     float(np.mean(np.abs(joint_delta))),
-                                    len(action_plan),
                                 )
 
-                    if pending_request_step is None and len(action_plan) <= args.async_prefetch_steps:
-                        policy_obs = _to_policy_observation(obs, prompt)
-                        try:
-                            inference_queue.put_nowait((step, policy_obs))
-                        except Full:
-                            pass
-                        else:
-                            pending_request_step = step
+                            action_plan.extend(chunk)
 
-                else:
-                    if not action_plan:
-                        policy_obs = _to_policy_observation(obs, prompt)
-                        policy_result = policy.infer(policy_obs)
-                        raw_actions = np.asarray(policy_result["actions"], dtype=np.float32)
-                        raw_chunk = _extract_action_window(
-                            raw_actions,
-                            start=0,
-                            size=args.replan_steps,
-                            strict_size=True,
-                        )
-                        current_state = _current_state_from_obs(obs)
-                        chunk = _build_action_plan(raw_chunk, current_state, args.chunk_execution)
-
-                        if args.debug_action_stats:
-                            joint_delta = chunk[:, :6] - current_state[None, :6]
+                    if action_plan:
+                        action = np.asarray(action_plan.popleft(), dtype=np.float32)
+                        hold_steps = 0
+                    else:
+                        # Keep tracking the measured current pose while waiting for a fresh plan.
+                        action = _current_state_from_obs(obs).copy()
+                        hold_steps += 1
+                        if args.debug_action_stats and hold_steps % max(args.debug_log_every, 1) == 0:
                             logging.info(
-                                "policy_chunk step=%d infer_ms=%.2f plan_mode=%s "
-                                "first_target=%s last_target=%s first_delta=%s last_delta=%s "
-                                "chunk_max_abs_delta=%.5f chunk_mean_abs_delta=%.5f",
+                                "holding_current_pose step=%d hold_steps=%d pending_request=%s",
                                 step,
-                                float(policy_result.get("policy_timing", {}).get("infer_ms", -1.0)),
-                                args.chunk_execution,
-                                np.array2string(chunk[0], precision=4, suppress_small=True),
-                                np.array2string(chunk[-1], precision=4, suppress_small=True),
-                                np.array2string(joint_delta[0], precision=4, suppress_small=True),
-                                np.array2string(joint_delta[-1], precision=4, suppress_small=True),
-                                float(np.max(np.abs(joint_delta))),
-                                float(np.mean(np.abs(joint_delta))),
+                                hold_steps,
+                                pending_request_step,
                             )
 
-                        action_plan.extend(chunk)
+                    obs, reward, done, info = _normalize_step(env.step(action))
+                    success = bool(info.get("success", done))
 
-                if action_plan:
-                    action = np.asarray(action_plan.popleft(), dtype=np.float32)
-                    hold_steps = 0
-                else:
-                    # Keep tracking the measured current pose while waiting for a fresh plan.
-                    action = _current_state_from_obs(obs).copy()
-                    hold_steps += 1
-                    if args.debug_action_stats and hold_steps % max(args.debug_log_every, 1) == 0:
-                        logging.info(
-                            "holding_current_pose step=%d hold_steps=%d pending_request=%s",
-                            step,
-                            hold_steps,
-                            pending_request_step,
-                        )
+                    logging.info(
+                        "episode=%d step=%d reward=%s done=%s success=%s",
+                        episode_index,
+                        step,
+                        reward,
+                        done,
+                        success,
+                    )
 
-                obs, reward, done, info = _normalize_step(env.step(action))
-                success = bool(info.get("success", done))
+                    if args.debug_action_stats and step % max(args.debug_log_every, 1) == 0:
+                        current = np.asarray(info.get("current_joint_positions", []), dtype=np.float32)
+                        target = np.asarray(info.get("target_action", []), dtype=np.float32)
+                        err = np.asarray(info.get("joint_error", []), dtype=np.float32)
+                        qd = np.asarray(info.get("joint_velocity_cmd", []), dtype=np.float32)
+                        if current.size and target.size and err.size and qd.size:
+                            logging.info(
+                                "control step=%d current=%s target=%s err=%s qd=%s "
+                                "max_abs_err=%.5f max_abs_qd=%.5f",
+                                step,
+                                np.array2string(current, precision=4, suppress_small=True),
+                                np.array2string(target, precision=4, suppress_small=True),
+                                np.array2string(err, precision=4, suppress_small=True),
+                                np.array2string(qd, precision=4, suppress_small=True),
+                                float(np.max(np.abs(err[:6]))),
+                                float(np.max(np.abs(qd[:6]))),
+                            )
 
-                logging.info(
-                    "episode=%d step=%d reward=%s done=%s success=%s",
-                    episode_index,
-                    step,
-                    reward,
-                    done,
-                    success,
-                )
+                    if frames is not None:
+                        frames.append(_get_frame(obs))
 
-                if args.debug_action_stats and step % max(args.debug_log_every, 1) == 0:
-                    current = np.asarray(info.get("current_joint_positions", []), dtype=np.float32)
-                    target = np.asarray(info.get("target_action", []), dtype=np.float32)
-                    err = np.asarray(info.get("joint_error", []), dtype=np.float32)
-                    qd = np.asarray(info.get("joint_velocity_cmd", []), dtype=np.float32)
-                    if current.size and target.size and err.size and qd.size:
-                        logging.info(
-                            "control step=%d current=%s target=%s err=%s qd=%s "
-                            "max_abs_err=%.5f max_abs_qd=%.5f",
-                            step,
-                            np.array2string(current, precision=4, suppress_small=True),
-                            np.array2string(target, precision=4, suppress_small=True),
-                            np.array2string(err, precision=4, suppress_small=True),
-                            np.array2string(qd, precision=4, suppress_small=True),
-                            float(np.max(np.abs(err[:6]))),
-                            float(np.max(np.abs(qd[:6]))),
-                        )
-
-                if frames is not None:
-                    frames.append(_get_frame(obs))
-
-                if done:
-                    break
+                    if done:
+                        break
+            except BaseException as exc:
+                pending_exception = exc
+                if isinstance(exc, KeyboardInterrupt):
+                    logging.info(
+                        "KeyboardInterrupt at episode=%d step=%d. Saving partial video before shutdown.",
+                        episode_index,
+                        step,
+                    )
+                raise
+            finally:
+                if frames is not None and video_path is not None:
+                    try:
+                        _write_video(video_path, frames, fps=args.hz)
+                    except Exception:
+                        logging.exception("Failed to save video: %s", video_path)
+                        if pending_exception is None:
+                            raise
 
             total_successes += int(success)
-            if frames is not None:
-                video_path = _resolve_video_path(
-                    video_dir,
-                    video_filename=args.video_filename,
-                    episode_index=episode_index,
-                    num_episodes=args.num_episodes,
-                )
-                imageio.mimwrite(video_path, frames, fps=max(args.hz, 1))
-                logging.info("saved_video=%s", video_path)
-
             logging.info("episode=%d success=%s", episode_index, success)
 
         logging.info("success_rate=%.3f", total_successes / max(args.num_episodes, 1))
