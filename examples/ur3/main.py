@@ -10,7 +10,7 @@ from queue import Full
 from queue import Queue
 import sys
 import threading
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import imageio.v2 as imageio
 import numpy as np
@@ -19,6 +19,10 @@ import tyro
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
 from openpi.training import config as _config
+
+DEFAULT_VIDEO_OUT_DIR = pathlib.Path(
+    "/data/jhshin/openpi/video/pi05_ur3_pvi_hpr_h50/pi05_ur3_pvi_hpr_h50_new_data_0407"
+)
 
 
 class UR3Env(Protocol):
@@ -43,6 +47,8 @@ class Args:
     num_episodes: int = 1
     pytorch_device: str | None = None
     video_out_dir: str | None = None
+    video_filename: str | None = None
+    save_video: Literal["auto", "on", "off"] = "auto"
     debug_action_stats: bool = False
     debug_log_every: int = 1
     chunk_execution: str = "chunk_endpoint"
@@ -262,13 +268,59 @@ def _create_env(args: Args) -> UR3Env:
     return env_factory(**env_kwargs)
 
 
+def _resolve_video_dir(args: Args) -> pathlib.Path | None:
+    if args.save_video == "off":
+        return None
+    if args.video_out_dir is not None:
+        return pathlib.Path(args.video_out_dir)
+    if args.save_video == "on":
+        return DEFAULT_VIDEO_OUT_DIR
+    return None
+
+
+def _normalize_video_filename(video_filename: str) -> pathlib.Path:
+    filename = pathlib.Path(video_filename).name
+    if not filename or filename in {".", ".."}:
+        raise ValueError("video_filename must be a valid filename")
+
+    path = pathlib.Path(filename)
+    if path.suffix == "":
+        return path.with_suffix(".mp4")
+    if path.suffix.lower() != ".mp4":
+        raise ValueError("video_filename must end with .mp4")
+    return path
+
+
+def _resolve_video_path(
+    video_dir: pathlib.Path,
+    *,
+    video_filename: str | None,
+    episode_index: int,
+    num_episodes: int,
+) -> pathlib.Path:
+    if video_filename is None:
+        return video_dir / f"episode_{episode_index:04d}.mp4"
+
+    filename = _normalize_video_filename(video_filename)
+    if num_episodes == 1:
+        return video_dir / filename
+    return video_dir / f"{filename.stem}_episode_{episode_index:04d}{filename.suffix}"
+
+
 def run(args: Args) -> None:
     policy = create_policy(args)
     env = _create_env(args)
 
-    video_dir = pathlib.Path(args.video_out_dir) if args.video_out_dir is not None else None
+    video_dir = _resolve_video_dir(args)
     if video_dir is not None:
         video_dir.mkdir(parents=True, exist_ok=True)
+        logging.info(
+            "video_saving=enabled video_dir=%s video_filename=%s",
+            video_dir,
+            args.video_filename or "<auto>",
+        )
+    else:
+        logging.info("video_saving=disabled")
 
     if args.replan_steps <= 0:
         raise ValueError("replan_steps must be positive")
@@ -493,7 +545,14 @@ def run(args: Args) -> None:
 
             total_successes += int(success)
             if frames is not None:
-                imageio.mimwrite(video_dir / f"episode_{episode_index:04d}.mp4", frames, fps=max(args.hz, 1))
+                video_path = _resolve_video_path(
+                    video_dir,
+                    video_filename=args.video_filename,
+                    episode_index=episode_index,
+                    num_episodes=args.num_episodes,
+                )
+                imageio.mimwrite(video_path, frames, fps=max(args.hz, 1))
+                logging.info("saved_video=%s", video_path)
 
             logging.info("episode=%d success=%s", episode_index, success)
 
