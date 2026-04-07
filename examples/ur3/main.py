@@ -64,7 +64,7 @@ class Args:
     camera_fps: int = 30
     base_camera_serial: str | None = None
     wrist_camera_serial: str | None = None
-    base_crop_box: tuple[int, int, int, int] | None = (0, 500, 0, 480)
+    base_crop_box: tuple[int, int, int, int] | None = (0, 550, 0, 480)
     wrist_crop_box: tuple[int, int, int, int] | None = None
     base_crop_center: tuple[int, int] | None = None
     wrist_crop_center: tuple[int, int] | None = None
