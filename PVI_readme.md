@@ -215,3 +215,50 @@ Outputs are written under:
 - `data/libero_plus_eval/<output_tag>/per_suite_category_summary_long.csv`
 
 `summary.json` is updated after each completed task, so partial progress survives process crashes.
+
+CUDA_VISIBLE_DEVICES=2,3,4,5\
+  HF_LEROBOT_HOME=$PWD/lerobot \
+  ./.venv/bin/python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=4 \
+    scripts/train_pytorch_PVI.py pi05_libero_plus_pvi_from_pi05_libero \
+    --exp_name pi05_libero_plus_pvi_bs128_160k_from_pi05_libero \
+    --resume
+
+CUDA_VISIBLE_DEVICES=4 \
+  MUJOCO_EGL_DEVICE_ID=6 \
+  POLICY_PYTORCH_DEVICE=cuda:0 \
+  NUM_TRIALS_PER_TASK=1 \
+  POLICY_CONFIG=pi05_libero_pvi_infer \
+  POLICY_DIR=/data/jhshin/openpi/checkpoints/pi05_libero_pvi_from_pi05_libero/pi05_libero_pvi_bs128_40k_from_pi05_libero/40000 \
+  OUTPUT_TAG=pi05_libero_pvi_dino_bs128_40k_from_pi05_libero_ckpt \
+  ./scripts/eval_libero_plus_local_by_suite.sh libero_object
+
+  CUDA_VISIBLE_DEVICES=5 \
+  MUJOCO_EGL_DEVICE_ID=5 \
+  POLICY_PYTORCH_DEVICE=cuda:0 \
+  NUM_TRIALS_PER_TASK=1 \
+  POLICY_CONFIG=pi05_libero_pvi_infer \
+  POLICY_DIR=/data/jhshin/openpi/checkpoints/pi05_libero_pvi_from_pi05_libero/pi05_libero_pvi_bs128_40k_from_pi05_libero/40000 \
+  OUTPUT_TAG=pi05_libero_pvi_dino_bs128_40k_from_pi05_libero_ckpt \
+  ./scripts/eval_libero_plus_local_by_suite.sh libero_10
+
+  CUDA_VISIBLE_DEVICES=6 \
+  MUJOCO_EGL_DEVICE_ID=4 \
+  POLICY_PYTORCH_DEVICE=cuda:0 \
+  NUM_TRIALS_PER_TASK=1 \
+  POLICY_CONFIG=pi05_libero_pvi_infer \
+  POLICY_DIR=/data/jhshin/openpi/checkpoints/pi05_libero_pvi_from_pi05_libero/pi05_libero_pvi_bs128_40k_from_pi05_libero/40000 \
+  OUTPUT_TAG=pi05_libero_pvi_dino_bs128_40k_from_pi05_libero_ckpt \
+  ./scripts/eval_libero_plus_local_by_suite.sh libero_goal
+
+  참고로 spatial은 그대로 이겁니다:
+
+  CUDA_VISIBLE_DEVICES=3 \
+  MUJOCO_EGL_DEVICE_ID=0 \
+  POLICY_PYTORCH_DEVICE=cuda:0 \
+  NUM_TRIALS_PER_TASK=1 \
+  POLICY_CONFIG=pi05_libero_pvi_infer \
+  POLICY_DIR=/data/jhshin/openpi/checkpoints/pi05_libero_pvi_from_pi05_libero/pi05_libero_pvi_bs128_40k_from_pi05_libero/40000 \
+  OUTPUT_TAG=pi05_libero_pvi_dino_bs128_40k_from_pi05_libero_ckpt \
+  SUITE_OUTPUT_DIR_MAP="libero_spatial:libero_spatial_resume" \
+  TASK_START_INDEX=1691 \
+  ./scripts/eval_libero_plus_local_by_suite.sh libero_spatial

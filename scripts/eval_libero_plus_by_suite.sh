@@ -21,6 +21,7 @@ MUJOCO_GL_VALUE="${MUJOCO_GL:-}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-1}"
 SUITE_PORT_MAP="${SUITE_PORT_MAP:-}"
 SUITE_HOST_MAP="${SUITE_HOST_MAP:-}"
+SUITE_OUTPUT_DIR_MAP="${SUITE_OUTPUT_DIR_MAP:-}"
 
 if [[ "$#" -gt 0 ]]; then
   SUITES=("$@")
@@ -50,6 +51,21 @@ cleanup() {
     wait "$SERVER_PID" >/dev/null 2>&1 || true
   fi
 }
+
+validate_egl_device_id() {
+  local egl_device="$1"
+
+  if [[ -z "$egl_device" ]]; then
+    return
+  fi
+
+  if [[ ! "$egl_device" =~ ^[0-9]+$ ]]; then
+    echo "Invalid EGL configuration: MUJOCO_EGL_DEVICE_ID must be a non-negative integer, got '$egl_device'" >&2
+    exit 1
+  fi
+}
+
+validate_egl_device_id "${MUJOCO_EGL_DEVICE_ID:-}"
 
 resolve_suite_value() {
   local suite="$1"
@@ -117,9 +133,14 @@ run_suite() {
   local suite="$1"
   local suite_host
   local suite_port
+  local suite_output_name
+  local suite_output_dir
+  local suite_log
+  local suite_summary
   suite_host="$(resolve_suite_value "$suite" "$SUITE_HOST_MAP" "$HOST")"
   suite_port="$(resolve_suite_value "$suite" "$SUITE_PORT_MAP" "$PORT")"
-  suite_output_dir="$OUTPUT_ROOT/$suite"
+  suite_output_name="$(resolve_suite_value "$suite" "$SUITE_OUTPUT_DIR_MAP" "$suite")"
+  suite_output_dir="$OUTPUT_ROOT/$suite_output_name"
   suite_log="$suite_output_dir/eval.log"
   suite_summary="$suite_output_dir/summary.json"
 
@@ -180,17 +201,37 @@ else
   done
 fi
 
-"$CLIENT_PYTHON" - <<'PY' "$OUTPUT_ROOT" "${SUITES[@]}"
+"$CLIENT_PYTHON" - <<'PY' "$OUTPUT_ROOT" "$SUITE_OUTPUT_DIR_MAP" "${SUITES[@]}"
 import json
 import pathlib
 import sys
 
 output_root = pathlib.Path(sys.argv[1])
-suites = sys.argv[2:]
+output_dir_map = sys.argv[2]
+suites = sys.argv[3:]
 aggregate = {}
+known_suites = ["libero_spatial", "libero_object", "libero_goal", "libero_10"]
+candidate_suites = []
 
-for suite in suites:
-    summary_path = output_root / suite / "summary.json"
+for suite in known_suites + list(suites):
+    if suite not in candidate_suites:
+        candidate_suites.append(suite)
+
+
+def resolve_output_dir_name(suite: str) -> str:
+    if not output_dir_map:
+        return suite
+
+    for entry in output_dir_map.split(","):
+        if not entry:
+            continue
+        key, value = entry.split(":", 1)
+        if key == suite:
+            return value
+    return suite
+
+for suite in candidate_suites:
+    summary_path = output_root / resolve_output_dir_name(suite) / "summary.json"
     if not summary_path.exists():
         continue
     with open(summary_path, "r") as f:
