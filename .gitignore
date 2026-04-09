@@ -4,6 +4,7 @@ checkpoints/
 data/
 wandb/
 hpr_checkpoints/
+_external/gello_software/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

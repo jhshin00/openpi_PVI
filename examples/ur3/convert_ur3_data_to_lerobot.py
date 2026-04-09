@@ -295,7 +295,7 @@ def create_empty_dataset(
     repo_id: str,
     robot_type: str,
     root: str | Path | None = None,
-    mode: Literal["video", "image"] = "video",
+    mode: Literal["video", "image"] = "image",
     *,
     image_shapes: dict[str, tuple[int, int, int]],
     has_velocity: bool = False,
