@@ -21,7 +21,8 @@ class Pi0Config(_model.BaseModelConfig):
     paligemma_variant: _gemma.Variant = "gemma_2b"
     action_expert_variant: _gemma.Variant = "gemma_300m"
     use_pvi: bool = False
-    pvi_aux_encoder_name: str = "facebook/dinov2-base"
+    pvi_aux_encoder_type: str = "dinov2"  # One of: dinov2, siglip, hpr, clip, r3m.
+    pvi_aux_encoder_name: str = "facebook/dinov2-base"  # Model id or HPR checkpoint path.
     pvi_injector_init_std: float = 0.0
 
     # Set the model specific defaults.

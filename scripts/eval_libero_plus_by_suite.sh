@@ -16,6 +16,7 @@ TASK_CATEGORY="${TASK_CATEGORY:-}"
 DIFFICULTY_LEVEL="${DIFFICULTY_LEVEL:-}"
 TASK_NAME_PATTERN="${TASK_NAME_PATTERN:-}"
 TASK_START_INDEX="${TASK_START_INDEX:-}"
+TASK_END_INDEX="${TASK_END_INDEX:-}"
 TASK_LIMIT="${TASK_LIMIT:-}"
 MUJOCO_GL_VALUE="${MUJOCO_GL:-}"
 PARALLEL_JOBS="${PARALLEL_JOBS:-1}"
@@ -66,6 +67,34 @@ validate_egl_device_id() {
 }
 
 validate_egl_device_id "${MUJOCO_EGL_DEVICE_ID:-}"
+
+validate_non_negative_int() {
+  local value="$1"
+  local name="$2"
+
+  if [[ -z "$value" ]]; then
+    return
+  fi
+
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    echo "Invalid $name: expected a non-negative integer, got '$value'" >&2
+    exit 1
+  fi
+}
+
+validate_non_negative_int "$TASK_START_INDEX" "TASK_START_INDEX"
+validate_non_negative_int "$TASK_END_INDEX" "TASK_END_INDEX"
+validate_non_negative_int "$TASK_LIMIT" "TASK_LIMIT"
+
+if [[ -n "$TASK_END_INDEX" && -n "$TASK_LIMIT" ]]; then
+  echo "TASK_END_INDEX and TASK_LIMIT are mutually exclusive." >&2
+  exit 1
+fi
+
+if [[ -n "$TASK_END_INDEX" && -n "$TASK_START_INDEX" && "$TASK_END_INDEX" -lt "$TASK_START_INDEX" ]]; then
+  echo "TASK_END_INDEX must be greater than or equal to TASK_START_INDEX." >&2
+  exit 1
+fi
 
 resolve_suite_value() {
   local suite="$1"
@@ -169,6 +198,9 @@ run_suite() {
   fi
   if [[ -n "$TASK_START_INDEX" ]]; then
     cmd+=(--args.task-start-index "$TASK_START_INDEX")
+  fi
+  if [[ -n "$TASK_END_INDEX" ]]; then
+    cmd+=(--args.task-end-index "$TASK_END_INDEX")
   fi
   if [[ -n "$TASK_LIMIT" ]]; then
     cmd+=(--args.task-limit "$TASK_LIMIT")

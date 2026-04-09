@@ -207,6 +207,24 @@ OUTPUT_TAG=pi05_libero_spatial_retry \
 ./scripts/eval_libero_plus_local_by_suite.sh libero_spatial
 ```
 
+Run an inclusive task range `[start, end]`:
+
+```bash
+cd /data/jhshin/openpi-libero-plus
+
+CUDA_VISIBLE_DEVICES=3 \
+MUJOCO_EGL_DEVICE_ID=0 \
+POLICY_PYTORCH_DEVICE=cuda:0 \
+NUM_TRIALS_PER_TASK=1 \
+POLICY_CONFIG=pi05_libero_pvi_infer_hpr \
+POLICY_DIR=/data/jhshin/openpi/checkpoints/pi05_libero_pvi_from_pi05_libero_hpr/pi05_libero_pvi_from_pi05_libero_hpr/40000 \
+OUTPUT_TAG=pi05_libero_pvi_hpr_from_pi05_libero_ckpt_40000 \
+SUITE_OUTPUT_DIR_MAP="libero_10:libero_10_resume" \
+TASK_START_INDEX=1611 \
+TASK_END_INDEX=1800 \
+./scripts/eval_libero_plus_local_by_suite.sh libero_10
+```
+
 Outputs are written under:
 
 - `data/libero_plus_eval/<output_tag>/<suite>/summary.json`

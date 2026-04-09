@@ -46,6 +46,7 @@ class Args:
     difficulty_level: Optional[int] = None  # Filter by difficulty level 1-5
     task_name_pattern: Optional[str] = None  # Optional regex filter on task names
     task_start_index: int = 0  # Optional offset into the filtered task list, useful for manual resume.
+    task_end_index: Optional[int] = None  # Optional inclusive end index into the filtered task list.
     task_limit: Optional[int] = None  # Optional cap after filtering
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
     num_trials_per_task: int = 10  # Number of rollouts per task
@@ -321,6 +322,7 @@ def _build_summary(
             "difficulty_level": args.difficulty_level,
             "task_name_pattern": args.task_name_pattern,
             "task_start_index": args.task_start_index,
+            "task_end_index": args.task_end_index,
             "task_limit": args.task_limit,
         },
         "policy": {
@@ -395,11 +397,25 @@ def _load_task_classification() -> Dict[str, Dict[str, Dict[str, Any]]]:
 
 
 def _filter_task_suite(task_suite, args: Args) -> None:
+    if args.task_start_index < 0:
+        raise ValueError(f"task_start_index must be non-negative, got {args.task_start_index}")
+    if args.task_end_index is not None and args.task_end_index < 0:
+        raise ValueError(f"task_end_index must be non-negative, got {args.task_end_index}")
+    if args.task_limit is not None and args.task_limit < 0:
+        raise ValueError(f"task_limit must be non-negative, got {args.task_limit}")
+    if args.task_end_index is not None and args.task_limit is not None:
+        raise ValueError("task_end_index and task_limit are mutually exclusive")
+    if args.task_end_index is not None and args.task_end_index < args.task_start_index:
+        raise ValueError(
+            f"task_end_index ({args.task_end_index}) must be >= task_start_index ({args.task_start_index})"
+        )
+
     if (
         args.task_category is None
         and args.difficulty_level is None
         and args.task_name_pattern is None
         and args.task_start_index == 0
+        and args.task_end_index is None
         and args.task_limit is None
     ):
         return
@@ -422,7 +438,9 @@ def _filter_task_suite(task_suite, args: Args) -> None:
             continue
         filtered_tasks.append(task)
 
-    if args.task_start_index > 0:
+    if args.task_end_index is not None:
+        filtered_tasks = filtered_tasks[args.task_start_index : args.task_end_index + 1]
+    elif args.task_start_index > 0:
         filtered_tasks = filtered_tasks[args.task_start_index :]
 
     if args.task_limit is not None:

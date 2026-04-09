@@ -1,6 +1,7 @@
 # Data directories.
 assets/
 checkpoints/
+hpr_checkpoints/
 data/
 lerobot/
 wandb/
