@@ -94,6 +94,7 @@ class _AsyncCamera:
         self._crop_center = crop_center
         self._crop_size = crop_size
         self._frame: np.ndarray | None = None
+        self._uncropped_frame: np.ndarray | None = None
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._update_loop, daemon=True)
@@ -133,18 +134,26 @@ class _AsyncCamera:
             if frame is None:
                 continue
 
+            uncropped_frame = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
             frame = self._crop(frame)
             frame = self._cv2.resize(frame, self._target_size, interpolation=self._cv2.INTER_LINEAR)
             frame = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
 
             with self._lock:
                 self._frame = frame
+                self._uncropped_frame = uncropped_frame
 
     def read(self) -> np.ndarray | None:
         with self._lock:
             if self._frame is None:
                 return None
             return self._frame.copy()
+
+    def read_pair(self) -> tuple[np.ndarray | None, np.ndarray | None]:
+        with self._lock:
+            frame = None if self._frame is None else self._frame.copy()
+            uncropped_frame = None if self._uncropped_frame is None else self._uncropped_frame.copy()
+            return frame, uncropped_frame
 
     def close(self) -> None:
         self._stop_event.set()
@@ -235,6 +244,7 @@ class OpenPIUR3Env:
         self._last_target_action: np.ndarray | None = None
         self._next_step_time: float | None = None
         self._zero_image = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+        self._zero_uncropped_image = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
         self._cameras: dict[str, _AsyncCamera] = {}
 
         if self.mock:
@@ -327,9 +337,11 @@ class OpenPIUR3Env:
         observations = {"joint_positions": np.asarray(self._robot.get_observations()["joint_positions"], dtype=np.float32)}
 
         for name, camera in self._cameras.items():
-            frame = camera.read()
+            frame, uncropped_frame = camera.read_pair()
             if frame is not None:
                 observations[f"{name}_rgb"] = frame
+            if uncropped_frame is not None:
+                observations[f"{name}_rgb_uncropped"] = uncropped_frame
 
         return observations
 
@@ -337,7 +349,9 @@ class OpenPIUR3Env:
         obs = {
             "state": raw_obs["joint_positions"],
             "base_image": np.asarray(raw_obs.get("base_rgb", self._zero_image)),
+            "base_image_uncropped": np.asarray(raw_obs.get("base_rgb_uncropped", self._zero_uncropped_image)),
             "wrist_image": np.asarray(raw_obs.get("wrist_rgb", self._zero_image)),
+            "wrist_image_uncropped": np.asarray(raw_obs.get("wrist_rgb_uncropped", self._zero_uncropped_image)),
         }
         if self.prompt is not None:
             obs["prompt"] = self.prompt

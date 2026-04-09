@@ -50,6 +50,7 @@ class Args:
     video_out_dir: str | None = None
     video_filename: str | None = None
     save_video: Literal["auto", "on", "off"] = "auto"
+    video_frame_source: Literal["cropped", "uncropped"] = "cropped"
     debug_action_stats: bool = False
     debug_log_every: int = 1
     chunk_execution: str = "chunk_endpoint"
@@ -238,8 +239,19 @@ def _to_policy_observation(obs: dict[str, Any], prompt: str | None) -> dict[str,
     return policy_obs
 
 
-def _get_frame(obs: dict[str, Any]) -> np.ndarray:
-    image = np.asarray(_first_present(obs, "observation/base_image", "base_image", "image"))
+def _get_frame(obs: dict[str, Any], *, source: Literal["cropped", "uncropped"]) -> np.ndarray:
+    if source == "uncropped":
+        image = np.asarray(
+            _first_present(
+                obs,
+                "observation/base_image_uncropped",
+                "base_image_uncropped",
+                "observation/base_image_raw",
+                "base_image_raw",
+            )
+        )
+    else:
+        image = np.asarray(_first_present(obs, "observation/base_image", "base_image", "image"))
     if image.ndim == 3 and image.shape[0] == 3:
         image = np.transpose(image, (1, 2, 0))
     if np.issubdtype(image.dtype, np.floating):
@@ -456,16 +468,18 @@ def _log_video_config(args: Args) -> None:
         logging.info("video_saving=disabled")
     elif args.video_out_dir is not None:
         logging.info(
-            "video_saving=enabled video_dir=%s video_filename=%s",
+            "video_saving=enabled video_dir=%s video_filename=%s video_frame_source=%s",
             pathlib.Path(args.video_out_dir),
             args.video_filename or "<auto>",
+            args.video_frame_source,
         )
     else:
         logging.info(
-            "video_saving=enabled video_dir_root=%s policy=%s checkpoint=%s prompt=<auto>",
+            "video_saving=enabled video_dir_root=%s policy=%s checkpoint=%s prompt=<auto> video_frame_source=%s",
             DEFAULT_VIDEO_ROOT,
             _policy_video_dirname(args.policy_config),
             _checkpoint_video_dirname(args.policy_dir),
+            args.video_frame_source,
         )
 
 
@@ -579,7 +593,7 @@ def _run_interactive_episode(
         video_path = None
 
     action_plan: collections.deque[np.ndarray] = collections.deque()
-    frames = [_get_frame(initial_obs)] if video_path is not None else None
+    frames = [_get_frame(initial_obs, source=args.video_frame_source)] if video_path is not None else None
     pending_request_step: int | None = None
     hold_steps = 0
     obs = initial_obs
@@ -766,7 +780,7 @@ def _run_interactive_episode(
                     )
 
             if frames is not None:
-                frames.append(_get_frame(obs))
+                frames.append(_get_frame(obs, source=args.video_frame_source))
 
             if done:
                 stop_reason = "done"
@@ -878,7 +892,7 @@ def _run_single_episode_mode(args: Args) -> None:
             pending_exception: BaseException | None = None
             try:
                 if frames is not None:
-                    frames.append(_get_frame(obs))
+                    frames.append(_get_frame(obs, source=args.video_frame_source))
 
                 for step in range(args.max_steps):
                     if args.async_inference:
@@ -1034,7 +1048,7 @@ def _run_single_episode_mode(args: Args) -> None:
                             )
 
                     if frames is not None:
-                        frames.append(_get_frame(obs))
+                        frames.append(_get_frame(obs, source=args.video_frame_source))
 
                     if done:
                         break
