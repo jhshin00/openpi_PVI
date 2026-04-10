@@ -43,6 +43,7 @@ import wandb
 import openpi.models.pi0_config
 import openpi.models_pytorch.pi0_pytorch
 import openpi.shared.normalize as _normalize
+from openpi.shared.safetensors_compat import load_model_with_fallback
 import openpi.training.config as _config
 import openpi.training.data_loader as _data
 
@@ -221,7 +222,7 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device):
 
         if safetensors_path.exists():
             model_to_load = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-            safetensors.torch.load_model(model_to_load, safetensors_path, device=str(device))
+            load_model_with_fallback(model_to_load, safetensors_path, device=str(device))
             logging.info("Loaded model state from safetensors format")
         else:
             raise FileNotFoundError(f"No model checkpoint found at {ckpt_dir}")
@@ -443,7 +444,7 @@ def train_loop(config: _config.TrainConfig):
         logging.info(f"Loading weights from: {config.pytorch_weight_path}")
 
         model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
-        safetensors.torch.load_model(
+        load_model_with_fallback(
             (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model), model_path
         )
         logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")

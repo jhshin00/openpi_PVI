@@ -43,6 +43,7 @@ import wandb
 import openpi.models.pi0_config
 import openpi.models_pytorch.pi0_pytorch
 import openpi.shared.normalize as _normalize
+from openpi.shared.safetensors_compat import load_model_with_fallback
 import openpi.training.config as _config
 import openpi.training.data_loader as _data
 
@@ -339,7 +340,7 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device):
 
         if safetensors_path.exists():
             model_to_load = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-            safetensors.torch.load_model(model_to_load, safetensors_path, device=str(device))
+            load_model_with_fallback(model_to_load, safetensors_path, device=str(device))
             logging.info("Loaded model state from safetensors format")
         else:
             raise FileNotFoundError(f"No model checkpoint found at {ckpt_dir}")
@@ -565,7 +566,7 @@ def train_loop(config: _config.TrainConfig):
         model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
         model_to_load = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
         strict = not getattr(model_cfg, "use_pvi", False)
-        missing, unexpected = safetensors.torch.load_model(model_to_load, model_path, strict=strict)
+        missing, unexpected = load_model_with_fallback(model_to_load, model_path, strict=strict)
         if getattr(model_cfg, "use_pvi", False):
             unexpected_missing = [key for key in missing if not model_to_load.is_expected_base_missing_key(key)]
             if unexpected_missing:

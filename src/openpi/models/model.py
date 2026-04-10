@@ -14,12 +14,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
-import safetensors
 import torch
 
 from openpi.models_pytorch import pi0_pytorch
 from openpi.shared import image_tools
 import openpi.shared.array_typing as at
+from openpi.shared.safetensors_compat import load_model_with_fallback
 
 logger = logging.getLogger("openpi")
 
@@ -243,7 +243,7 @@ class BaseModelConfig(abc.ABC):
     def load_pytorch(self, train_config, weight_path: str):
         logger.info(f"train_config: {train_config}")
         model = pi0_pytorch.create_model(config=train_config.model)
-        safetensors.torch.load_model(model, weight_path)
+        load_model_with_fallback(model, weight_path)
         return model
 
     @abc.abstractmethod
