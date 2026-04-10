@@ -226,6 +226,8 @@ class OpenPIUR3Env:
     target_smoothing_alpha: float = 1.0
     reset_joints_deg: tuple[float, ...] | None = (0.0, -90.0, -90.0, -90.0, 90.0, 90.0)
     reset_gripper: float = 0.0
+    gripper_open_threshold: float = 0.3
+    gripper_close_threshold: float = 0.7
     reset_steps: int = 120
     reset_max_delta: float = 0.05
     camera_warmup_sec: float = 5.0
@@ -238,10 +240,17 @@ class OpenPIUR3Env:
             raise ValueError("reset_joints_deg must contain exactly 6 joint angles")
         if not (0.0 < self.target_smoothing_alpha <= 1.0):
             raise ValueError("target_smoothing_alpha must be in the interval (0, 1].")
+        if not 0.0 <= self.gripper_open_threshold <= 1.0:
+            raise ValueError("gripper_open_threshold must be in [0, 1].")
+        if not 0.0 <= self.gripper_close_threshold <= 1.0:
+            raise ValueError("gripper_close_threshold must be in [0, 1].")
+        if self.gripper_open_threshold >= self.gripper_close_threshold:
+            raise ValueError("gripper_open_threshold must be smaller than gripper_close_threshold.")
 
         self._control_dt = 1.0 / float(self.hz)
         self._last_qd = np.zeros(6, dtype=np.float32)
         self._last_target_action: np.ndarray | None = None
+        self._last_gripper_command: float | None = None
         self._next_step_time: float | None = None
         self._zero_image = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
         self._zero_uncropped_image = np.zeros((self.camera_height, self.camera_width, 3), dtype=np.uint8)
@@ -357,30 +366,48 @@ class OpenPIUR3Env:
             obs["prompt"] = self.prompt
         return obs
 
+    def _apply_gripper_hysteresis(self, gripper_action: float) -> float:
+        if self._last_gripper_command is None:
+            midpoint = 0.5 * (self.gripper_open_threshold + self.gripper_close_threshold)
+            self._last_gripper_command = 1.0 if gripper_action >= midpoint else 0.0
+
+        if gripper_action >= self.gripper_close_threshold:
+            self._last_gripper_command = 1.0
+        elif gripper_action <= self.gripper_open_threshold:
+            self._last_gripper_command = 0.0
+
+        return self._last_gripper_command
+
     def _move_to_reset(self) -> None:
         assert self._reset_target is not None
 
         current = self._read_raw_obs()["joint_positions"]
         for alpha in np.linspace(0.0, 1.0, self.reset_steps):
             command = (1.0 - alpha) * current + alpha * self._reset_target
+            command[6] = self._apply_gripper_hysteresis(float(self._reset_target[6]))
             latest = self._read_raw_obs()["joint_positions"]
             delta = command - latest
             max_delta = np.max(np.abs(delta[:6]))
             if max_delta > self.reset_max_delta:
                 command[:6] = latest[:6] + delta[:6] / max_delta * self.reset_max_delta
-                command[6] = self._reset_target[6]
+                command[6] = self._apply_gripper_hysteresis(float(self._reset_target[6]))
 
             self._robot.command_joint_state(command.astype(np.float32))
             self._sleep_to_rate()
 
     def reset(self):
         self._last_qd[:] = 0.0
+        self._last_gripper_command = None
         self._next_step_time = time.perf_counter() + self._control_dt
 
         if self._reset_target is not None:
             self._move_to_reset()
 
         raw_obs = self._read_raw_obs()
+        reset_gripper_action = (
+            float(self._reset_target[6]) if self._reset_target is not None else float(raw_obs["joint_positions"][6])
+        )
+        self._apply_gripper_hysteresis(reset_gripper_action)
         self._last_target_action = raw_obs["joint_positions"].copy()
         obs = self._format_obs(raw_obs)
         info = {"prompt": self.prompt} if self.prompt is not None else {}
@@ -400,7 +427,7 @@ class OpenPIUR3Env:
                 (1.0 - self.target_smoothing_alpha) * self._last_target_action[:6]
                 + self.target_smoothing_alpha * action[:6]
             )
-            target_action[6] = action[6]
+        target_action[6] = self._apply_gripper_hysteresis(float(action[6]))
         self._last_target_action = target_action.copy()
 
         err = target_action[:6] - current[:6]

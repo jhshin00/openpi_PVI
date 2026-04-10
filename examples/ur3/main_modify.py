@@ -85,6 +85,8 @@ class Args:
     target_smoothing_alpha: float = 0.2
     reset_joints_deg: tuple[float, ...] | None = (0.0, -90.0, -90.0, -90.0, 90.0, 90.0)
     reset_gripper: float = 0.0
+    gripper_open_threshold: float = 0.3
+    gripper_close_threshold: float = 0.7
     reset_steps: int = 120
     reset_max_delta: float = 0.05
     camera_warmup_sec: float = 5.0
@@ -358,6 +360,8 @@ def _create_builtin_env(args: Args) -> UR3Env:
         target_smoothing_alpha=args.target_smoothing_alpha,
         reset_joints_deg=args.reset_joints_deg,
         reset_gripper=args.reset_gripper,
+        gripper_open_threshold=args.gripper_open_threshold,
+        gripper_close_threshold=args.gripper_close_threshold,
         reset_steps=args.reset_steps,
         reset_max_delta=args.reset_max_delta,
         camera_warmup_sec=args.camera_warmup_sec,
@@ -491,12 +495,11 @@ def _set_env_prompt(env: UR3Env, prompt: str | None) -> None:
 def _resolve_interactive_video_path(
     video_dir: pathlib.Path,
     *,
-    video_filename: str | None,
     episode_index: int,
 ) -> pathlib.Path:
     return _resolve_video_path(
         video_dir,
-        video_filename=video_filename,
+        video_filename=None,
         episode_index=episode_index,
         num_episodes=2,
     )
@@ -579,7 +582,6 @@ def _run_interactive_episode(
         video_dir.mkdir(parents=True, exist_ok=True)
         video_path = _resolve_interactive_video_path(
             video_dir,
-            video_filename=args.video_filename,
             episode_index=episode_index,
         )
         logging.info(
@@ -1093,6 +1095,8 @@ def _run_interactive_mode(args: Args) -> None:
     env = _create_env(args)
 
     _log_video_config(args)
+    if args.video_filename is not None and args.save_video != "off":
+        logging.info("interactive mode ignores --video-filename and uses episode_XXXX.mp4 names.")
 
     inference_queue: Queue[tuple[int, int, dict[str, Any]]] | None = None
     result_queue: Queue[tuple[int, int, dict[str, Any]]] | None = None

@@ -1,4 +1,7 @@
 import os
+from pathlib import Path
+
+from filelock import FileLock
 import torch
 from torch import nn
 from transformers import AutoModel, SiglipVisionModel, AutoImageProcessor, CLIPModel
@@ -191,16 +194,39 @@ class R3MAuxEncoder(nn.Module):
         try:
             import r3m
         except ImportError as exc:
+            missing_module = getattr(exc, "name", None)
+            if missing_module == "hydra":
+                raise ImportError(
+                    "R3M auxiliary encoder requires `hydra-core` in addition to `r3m`. "
+                    "Install `hydra-core` or choose a different pvi_aux_encoder_type."
+                ) from exc
             raise ImportError(
-                "R3M auxiliary encoder requires the optional `r3m` package. "
-                "Install it or choose a different pvi_aux_encoder_type."
+                "R3M auxiliary encoder requires the optional `r3m` package and its runtime dependencies. "
+                "Install them or choose a different pvi_aux_encoder_type."
             ) from exc
 
-        self.encoder = r3m.load_r3m(modelid=model_name).module
+        model_dir_names = {
+            "resnet18": "r3m_18",
+            "resnet34": "r3m_34",
+            "resnet50": "r3m_50",
+        }
+        model_dir_name = model_dir_names.get(model_name)
+        if model_dir_name is None:
+            raise ValueError(f"Unsupported R3M model_name: {model_name}")
+
+        # R3M lazily downloads weights into ~/.r3m on first use. Serialize that work so
+        # multi-process torchrun jobs do not race while creating the same files.
+        model_dir = Path.home() / ".r3m" / model_dir_name
+        model_dir.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(model_dir / ".download.lock")):
+            self.encoder = r3m.load_r3m(modelid=model_name).module
+
         if model_name == "resnet34":
             self.hidden_size = 512
         elif model_name == "resnet50":
             self.hidden_size = 2048
+        elif model_name == "resnet18":
+            self.hidden_size = 512
         else:
             raise ValueError(f"Unsupported R3M model_name: {model_name}")
         

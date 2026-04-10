@@ -38,8 +38,11 @@ uv run examples/ur3/convert_ur3_data_to_lerobot.py \
 To create a downsampled dataset, keep `fps` at the raw capture rate and increase
 `frame_stride`. For example, `fps=30, frame_stride=2` writes a 15 Hz dataset.
 
-By default, gello / `run_env_ik.py` episodes use the next retained joint state as
-the absolute action target. Pass `--dataset-config.gello-action-source joint_actions`
+By default, gello / `run_env_ik.py` episodes use a hybrid action target:
+the next retained joint state for the first 6 joints, and a binarized gripper
+label derived from the recorded `joint_actions` for the 7th dimension.
+Pass `--dataset-config.gello-action-source next_state` to keep the full
+next-state target, or `--dataset-config.gello-action-source joint_actions`
 to keep the recorded joint command instead.
 
 If the raw episodes are stored as:
@@ -82,12 +85,29 @@ GELLO_CAMERA_KEYS = {
 class DatasetConfig:
     fps: int = 30
     frame_stride: int = 1
-    gello_action_source: Literal["next_state", "joint_actions"] = "next_state"
+    gello_action_source: Literal["hybrid", "next_state", "joint_actions"] = "hybrid"
+    gello_gripper_open_threshold: float = 0.3
+    gello_gripper_close_threshold: float = 0.7
     use_videos: bool = True
     tolerance_s: float = 0.0001
     image_writer_processes: int = 10
     image_writer_threads: int = 5
     video_backend: str | None = None
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.gello_gripper_open_threshold <= 1.0:
+            raise ValueError(
+                f"gello_gripper_open_threshold must be in [0, 1], got {self.gello_gripper_open_threshold}"
+            )
+        if not 0.0 <= self.gello_gripper_close_threshold <= 1.0:
+            raise ValueError(
+                f"gello_gripper_close_threshold must be in [0, 1], got {self.gello_gripper_close_threshold}"
+            )
+        if self.gello_gripper_open_threshold >= self.gello_gripper_close_threshold:
+            raise ValueError(
+                "gello_gripper_open_threshold must be smaller than "
+                "gello_gripper_close_threshold"
+            )
 
     @property
     def output_fps(self) -> int:
@@ -291,6 +311,31 @@ def _peek_image_shapes(episode_path: Path, episode_format: EpisodeFormat) -> dic
     return shapes
 
 
+def _binarize_gripper_actions(
+    gripper_actions: torch.Tensor,
+    *,
+    open_threshold: float,
+    close_threshold: float,
+) -> torch.Tensor:
+    if gripper_actions.ndim != 1:
+        raise ValueError(f"Expected 1D gripper actions, got shape {tuple(gripper_actions.shape)}")
+    if gripper_actions.numel() == 0:
+        return gripper_actions.clone()
+
+    binary_actions = torch.empty_like(gripper_actions)
+    midpoint = 0.5 * (open_threshold + close_threshold)
+    state = 1.0 if float(gripper_actions[0]) >= midpoint else 0.0
+
+    for index, value in enumerate(gripper_actions.tolist()):
+        if value >= close_threshold:
+            state = 1.0
+        elif value <= open_threshold:
+            state = 0.0
+        binary_actions[index] = state
+
+    return binary_actions
+
+
 def create_empty_dataset(
     repo_id: str,
     robot_type: str,
@@ -409,7 +454,7 @@ def load_raw_episode_data(
             task_mapping=task_mapping,
         )
 
-    if episode_format == "gello" and dataset_config.gello_action_source == "next_state":
+    if episode_format == "gello" and dataset_config.gello_action_source in {"hybrid", "next_state"}:
         if state.shape[0] < 2:
             raise ValueError(
                 f"Need at least 2 frames to derive next-state actions from {episode_path}, got {state.shape[0]}"
@@ -417,7 +462,16 @@ def load_raw_episode_data(
 
         # `run_env_ik.py` stores observations after the control step. Using the next retained state as the
         # absolute action keeps each observation aligned with the action that produced the subsequent pose.
-        actions = state[1:].clone()
+        next_state_actions = state[1:].clone()
+        if dataset_config.gello_action_source == "hybrid":
+            # The follower gripper observation is delayed and object-dependent, so keep the arm target from the
+            # next observed state but derive a binary open/close label from the leader's recorded command.
+            next_state_actions[:, 6] = _binarize_gripper_actions(
+                actions[1:, 6],
+                open_threshold=dataset_config.gello_gripper_open_threshold,
+                close_threshold=dataset_config.gello_gripper_close_threshold,
+            )
+        actions = next_state_actions
         state = state[:-1]
         images_per_camera = {camera_name: images[:-1] for camera_name, images in images_per_camera.items()}
         if velocity is not None:

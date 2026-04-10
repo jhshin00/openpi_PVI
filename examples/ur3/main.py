@@ -83,6 +83,8 @@ class Args:
     target_smoothing_alpha: float = 0.2
     reset_joints_deg: tuple[float, ...] | None = (0.0, -90.0, -90.0, -90.0, 90.0, 90.0)
     reset_gripper: float = 0.0
+    gripper_open_threshold: float = 0.3
+    gripper_close_threshold: float = 0.7
     reset_steps: int = 120
     reset_max_delta: float = 0.05
     camera_warmup_sec: float = 5.0
@@ -263,6 +265,8 @@ def _create_builtin_env(args: Args) -> UR3Env:
         target_smoothing_alpha=args.target_smoothing_alpha,
         reset_joints_deg=args.reset_joints_deg,
         reset_gripper=args.reset_gripper,
+        gripper_open_threshold=args.gripper_open_threshold,
+        gripper_close_threshold=args.gripper_close_threshold,
         reset_steps=args.reset_steps,
         reset_max_delta=args.reset_max_delta,
         camera_warmup_sec=args.camera_warmup_sec,
