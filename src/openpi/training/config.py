@@ -562,6 +562,41 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
+def _robotwin_repack_transforms() -> _transforms.Group:
+    return _transforms.Group(
+        inputs=[
+            _transforms.RepackTransform(
+                {
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                }
+            )
+        ]
+    )
+
+
+def _robotwin_data_config(
+    repo_id: str = "robotwin/your_dataset",
+    *,
+    lerobot_root: str = "./datasets",
+    assets: AssetsConfig | None = None,
+) -> LeRobotAlohaDataConfig:
+    return LeRobotAlohaDataConfig(
+        repo_id=repo_id,
+        lerobot_root=lerobot_root,
+        assets=assets or AssetsConfig(assets_dir="./assets/pi05_robotwin"),
+        adapt_to_pi=False,
+        repack_transforms=_robotwin_repack_transforms(),
+        base_config=DataConfig(prompt_from_task=True),
+    )
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -1370,6 +1405,51 @@ _CONFIGS = [
         overwrite=False,
         resume=False,
         exp_name="pi05_libero_pvi_from_pi05_libero_r3m",
+    ),
+    TrainConfig(
+        name="pi05_robotwin",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=_robotwin_data_config(),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="./checkpoints/pytorch/pi05_base",
+        num_train_steps=30_000,
+        batch_size=64,
+        num_workers=4,
+        save_interval=2000,
+        keep_period=10000,
+        overwrite=False,
+        resume=False,
+        exp_name="pi05_robotwin_base",
+    ),
+    TrainConfig(
+        name="pi05_robotwin_pvi_from_base",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            discrete_state_input=False,
+            use_pvi=True,
+            pvi_aux_encoder_type="dinov2",
+            pvi_aux_encoder_name="facebook/dinov2-base",
+            pvi_injector_init_std=0.0,
+        ),
+        data=_robotwin_data_config(assets=AssetsConfig(assets_dir="./assets/pi05_robotwin_pvi")),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=4_000,
+            peak_lr=3.5e-5,
+            decay_steps=30_000,
+            decay_lr=3.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="./checkpoints/pytorch/pi05_base",
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=4,
+        save_interval=2000,
+        keep_period=10000,
+        overwrite=False,
+        resume=False,
+        exp_name="pi05_robotwin_pvi_from_base",
     ),
 ]
 

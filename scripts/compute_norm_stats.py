@@ -6,6 +6,7 @@ to the config assets directory.
 """
 
 import dataclasses
+import pathlib
 import numpy as np
 import tqdm
 import tyro
@@ -111,7 +112,8 @@ def main(config_name: str, max_frames: int | None = None, lerobot_root: str | No
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-    output_path = config.assets_dirs / data_config.repo_id
+    assets_root = pathlib.Path(config.data.assets.assets_dir or config.assets_dirs)
+    output_path = assets_root / data_config.asset_id
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 

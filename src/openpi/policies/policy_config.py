@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import os
 import pathlib
@@ -13,6 +14,20 @@ from openpi.training import config as _config
 import openpi.transforms as transforms
 
 
+def _infer_single_asset_id(assets_dir: pathlib.Path) -> str | None:
+    if not assets_dir.exists():
+        return None
+
+    norm_stats_files = sorted(assets_dir.rglob("norm_stats.json"))
+    if len(norm_stats_files) == 1:
+        return norm_stats_files[0].parent.relative_to(assets_dir).as_posix()
+
+    asset_dirs = sorted(path.name for path in assets_dir.iterdir() if path.is_dir())
+    if len(asset_dirs) == 1:
+        return asset_dirs[0]
+    return None
+
+
 def create_trained_policy(
     train_config: _config.TrainConfig,
     checkpoint_dir: pathlib.Path | str,
@@ -22,6 +37,7 @@ def create_trained_policy(
     default_prompt: str | None = None,
     norm_stats: dict[str, transforms.NormStats] | None = None,
     pytorch_device: str | None = None,
+    asset_id_override: str | None = None,
 ) -> _policy.Policy:
     """Create a policy from a trained checkpoint.
 
@@ -37,6 +53,8 @@ def create_trained_policy(
             from the checkpoint directory.
         pytorch_device: Device to use for PyTorch models (e.g., "cpu", "cuda", "cuda:0").
                       If None and is_pytorch=True, will use "cuda" if available, otherwise "cpu".
+        asset_id_override: Optional asset id override. Useful when loading checkpoints whose bundled
+            normalization stats are stored under an asset id that differs from the static training config.
 
     Note:
         The function automatically detects whether the model is PyTorch-based by checking for the
@@ -56,23 +74,46 @@ def create_trained_policy(
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
+    if asset_id_override is not None:
+        data_config = dataclasses.replace(data_config, asset_id=asset_id_override)
+
     if norm_stats is None:
+        checkpoint_assets_dir = checkpoint_dir / "assets"
+
         # Prefer the copy saved inside the checkpoint so inference uses the exact training-time statistics.
         # Fall back to the config-provided assets when evaluating checkpoints that do not bundle norm stats
         # (for example a converted base PyTorch checkpoint).
-        if data_config.asset_id is None:
+        asset_id = data_config.asset_id
+        if asset_id is None:
+            asset_id = _infer_single_asset_id(checkpoint_assets_dir)
+            if asset_id is not None:
+                logging.info("Inferred checkpoint asset id %s from %s", asset_id, checkpoint_assets_dir)
+
+        if asset_id is None:
             raise ValueError("Asset id is required to load norm stats.")
+
         try:
-            norm_stats = _checkpoints.load_norm_stats(checkpoint_dir / "assets", data_config.asset_id)
+            norm_stats = _checkpoints.load_norm_stats(checkpoint_assets_dir, asset_id)
         except FileNotFoundError:
-            if data_config.norm_stats is None:
+            inferred_asset_id = _infer_single_asset_id(checkpoint_assets_dir)
+            if inferred_asset_id is not None and inferred_asset_id != asset_id:
+                logging.info(
+                    "Norm stats not found for asset id %s in checkpoint %s, retrying with inferred asset id %s",
+                    asset_id,
+                    checkpoint_dir,
+                    inferred_asset_id,
+                )
+                norm_stats = _checkpoints.load_norm_stats(checkpoint_assets_dir, inferred_asset_id)
+                asset_id = inferred_asset_id
+            elif data_config.norm_stats is None:
                 raise
-            logging.info(
-                "Norm stats not found in checkpoint %s, falling back to config assets for %s",
-                checkpoint_dir,
-                data_config.asset_id,
-            )
-            norm_stats = data_config.norm_stats
+            else:
+                logging.info(
+                    "Norm stats not found in checkpoint %s, falling back to config assets for %s",
+                    checkpoint_dir,
+                    asset_id,
+                )
+                norm_stats = data_config.norm_stats
 
     # Determine the device to use for PyTorch models
     if is_pytorch and pytorch_device is None:

@@ -4,3 +4,6 @@
 [submodule "third_party/libero"]
 	path = third_party/libero
 	url = https://github.com/Lifelong-Robot-Learning/LIBERO.git
+[submodule "third_party/robotwin"]
+	path = third_party/robotwin
+	url = https://github.com/RoboTwin-Platform/RoboTwin.git
