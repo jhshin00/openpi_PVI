@@ -584,7 +584,7 @@ def _robotwin_repack_transforms() -> _transforms.Group:
 def _robotwin_data_config(
     repo_id: str = "robotwin/your_dataset",
     *,
-    lerobot_root: str = "./datasets",
+    lerobot_root: str = "/data/shkim/RoboTwin/lerobot_data",
     assets: AssetsConfig | None = None,
 ) -> LeRobotAlohaDataConfig:
     return LeRobotAlohaDataConfig(
@@ -594,6 +594,48 @@ def _robotwin_data_config(
         adapt_to_pi=False,
         repack_transforms=_robotwin_repack_transforms(),
         base_config=DataConfig(prompt_from_task=True),
+    )
+
+
+def _robotwin_aloha_pvi_train_config(
+    name: str,
+    *,
+    aux_encoder_type: str,
+    aux_encoder_name: str,
+    exp_name: str | None = None,
+) -> TrainConfig:
+    return TrainConfig(
+        name=name,
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            discrete_state_input=False,
+            use_pvi=True,
+            pvi_aux_encoder_type=aux_encoder_type,
+            pvi_aux_encoder_name=aux_encoder_name,
+            pvi_injector_init_std=0.0,
+        ),
+        data=_robotwin_data_config(
+            repo_id="robotwin_blocks_ranking_rgb_aloha_agilex_randomized_500",
+            assets=AssetsConfig(assets_dir="./assets_shkim/pi05_robotwin_pvi"),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=4_000,
+            peak_lr=3.5e-5,
+            decay_steps=40_000,
+            decay_lr=3.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="./checkpoints/pytorch/pi05_base",
+        num_train_steps=40_000,
+        batch_size=32,
+        num_workers=4,
+        save_interval=2000,
+        keep_period=10000,
+        overwrite=False,
+        resume=False,
+        exp_name=exp_name or name,
     )
 
 
@@ -1412,7 +1454,7 @@ _CONFIGS = [
         data=_robotwin_data_config(),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="./checkpoints/pytorch/pi05_base",
-        num_train_steps=30_000,
+        num_train_steps=40_000,
         batch_size=64,
         num_workers=4,
         save_interval=2000,
@@ -1435,14 +1477,14 @@ _CONFIGS = [
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=4_000,
             peak_lr=3.5e-5,
-            decay_steps=30_000,
+            decay_steps=40_000,
             decay_lr=3.5e-6,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="./checkpoints/pytorch/pi05_base",
-        num_train_steps=30_000,
+        num_train_steps=40_000,
         batch_size=32,
         num_workers=4,
         save_interval=2000,
@@ -1450,6 +1492,31 @@ _CONFIGS = [
         overwrite=False,
         resume=False,
         exp_name="pi05_robotwin_pvi_from_base",
+    ),
+    _robotwin_aloha_pvi_train_config(
+        name="pi05_robotwin_aloha_pvi_dino",
+        aux_encoder_type="dinov2",
+        aux_encoder_name="facebook/dinov2-base",
+    ),
+    _robotwin_aloha_pvi_train_config(
+        name="pi05_robotwin_aloha_pvi_siglip",
+        aux_encoder_type="siglip",
+        aux_encoder_name="google/siglip-base-patch16-224",
+    ),
+    _robotwin_aloha_pvi_train_config(
+        name="pi05_robotwin_aloha_pvi_clip",
+        aux_encoder_type="clip",
+        aux_encoder_name="openai/clip-vit-base-patch32",
+    ),
+    _robotwin_aloha_pvi_train_config(
+        name="pi05_robotwin_aloha_pvi_r3m",
+        aux_encoder_type="r3m",
+        aux_encoder_name="resnet34",
+    ),
+    _robotwin_aloha_pvi_train_config(
+        name="pi05_robotwin_aloha_pvi_hpr",
+        aux_encoder_type="hpr",
+        aux_encoder_name="hpr_checkpoints/hpr_fullfinetune_base_lang_trace_negative_mod.ckpt",
     ),
 ]
 

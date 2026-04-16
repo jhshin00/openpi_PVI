@@ -83,8 +83,17 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, enabled: bool = T
         run_id = (ckpt_dir / "wandb_id.txt").read_text().strip()
         wandb.init(id=run_id, resume="must", project=config.project_name)
     else:
+        run_name = config.exp_name
+        if config.name and config.exp_name and config.exp_name != config.name:
+            run_name = f"{config.name}__{config.exp_name}"
+        tags = [config.name]
+        encoder_type = getattr(config.model, "pvi_aux_encoder_type", None)
+        if encoder_type:
+            tags.append(encoder_type)
         wandb.init(
-            name=config.exp_name,
+            name=run_name,
+            group=config.exp_name,
+            tags=tags,
             config=dataclasses.asdict(config),
             project=config.project_name,
         )
@@ -446,7 +455,7 @@ def train_loop(config: _config.TrainConfig):
                 raise FileNotFoundError(f"No valid checkpoints found in {exp_checkpoint_dir} for resume")
         else:
             raise FileNotFoundError(f"Experiment checkpoint directory {exp_checkpoint_dir} does not exist for resume")
-    elif config.overwrite and config.checkpoint_dir.exists():
+    elif config.overwrite and config.checkpoint_dir.exists() and is_main:
         shutil.rmtree(config.checkpoint_dir)
         logging.info(f"Overwriting checkpoint directory: {config.checkpoint_dir}")
 
@@ -454,11 +463,16 @@ def train_loop(config: _config.TrainConfig):
     if not resuming:
         # For new runs, create experiment-specific checkpoint directory
         exp_checkpoint_dir = config.checkpoint_dir
-        exp_checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        logging.info(f"Created experiment checkpoint directory: {exp_checkpoint_dir}")
+        if is_main:
+            exp_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            logging.info(f"Created experiment checkpoint directory: {exp_checkpoint_dir}")
     else:
         # For resume, checkpoint_dir is already set to the experiment directory
-        logging.info(f"Using existing experiment checkpoint directory: {config.checkpoint_dir}")
+        if is_main:
+            logging.info(f"Using existing experiment checkpoint directory: {config.checkpoint_dir}")
+
+    if use_ddp:
+        dist.barrier()
 
     # Initialize wandb (only on main process)
     if is_main:

@@ -88,8 +88,10 @@ def create_rlds_dataloader(
     return data_loader, num_batches
 
 
-def main(config_name: str, max_frames: int | None = None, lerobot_root: str | None = None):
+def main(config_name: str, max_frames: int | None = None, lerobot_root: str | None = None, repo_id: str | None = None):
     config = _config.get_config(config_name)
+    if repo_id is not None:
+        config = dataclasses.replace(config, data=dataclasses.replace(config.data, repo_id=repo_id))
     data_config = config.data.create(config.assets_dirs, config.model)
     if lerobot_root is not None:
         data_config = dataclasses.replace(data_config, lerobot_root=lerobot_root)

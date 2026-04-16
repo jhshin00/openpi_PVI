@@ -30,6 +30,12 @@ import numpy as np
 import tyro
 import yaml
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
+
 from openpi.policies import policy_config as _policy_config
 from openpi.training import config as _config
 
@@ -42,6 +48,7 @@ class Args:
     exp_name: str | None = None
     checkpoint_id: str = "30000"
     checkpoint_dir: Path | None = None
+    checkpoint_base_dir: Path = REPO_ROOT / "checkpoints_local"
     robotwin_root: Path = Path("third_party/robotwin")
     result_root: Path = Path("./eval_result/robotwin")
     instruction_type: str = "unseen"
@@ -180,7 +187,8 @@ def _infer_checkpoint_dir(args: Args, train_config: _config.TrainConfig, repo_ro
         return args.checkpoint_dir.resolve()
     if args.exp_name is None:
         raise ValueError("Either checkpoint_dir or exp_name must be provided for RoboTwin evaluation.")
-    checkpoint_dir = repo_root / train_config.checkpoint_base_dir / args.train_config / args.exp_name / str(args.checkpoint_id)
+    checkpoint_base_dir = args.checkpoint_base_dir
+    checkpoint_dir = checkpoint_base_dir / args.train_config / args.exp_name / str(args.checkpoint_id)
     return checkpoint_dir.resolve()
 
 

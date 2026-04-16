@@ -5,6 +5,11 @@ data/
 wandb/
 hpr_checkpoints/
 
+assets_shkim/
+checkpoints_local/
+datasets/
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -7,6 +7,8 @@ import tyro
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+if str(REPO_ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from examples.robotwin.workflow.common import prepare_robotwin_train_config
 from scripts import train_pytorch_PVI as _train
@@ -19,7 +21,9 @@ class Args:
     repo_id: str
     lerobot_root: str = "./datasets"
     asset_id: str | None = None
-    overwrite: bool = True
+    checkpoint_base_dir: str = str(REPO_ROOT / "checkpoints_local")
+    num_train_steps: int | None = None
+    overwrite: bool = False
     resume: bool = False
 
 
@@ -31,6 +35,8 @@ def main(args: Args) -> None:
         exp_name=args.model_name,
         lerobot_root=args.lerobot_root,
         asset_id=args.asset_id,
+        checkpoint_base_dir=args.checkpoint_base_dir,
+        num_train_steps=args.num_train_steps,
         overwrite=args.overwrite,
         resume=args.resume,
     )

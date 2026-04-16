@@ -10,6 +10,8 @@ def prepare_robotwin_train_config(
     exp_name: str | None = None,
     lerobot_root: str = "./datasets",
     asset_id: str | None = None,
+    checkpoint_base_dir: str | None = None,
+    num_train_steps: int | None = None,
     overwrite: bool | None = None,
     resume: bool | None = None,
 ) -> _config.TrainConfig:
@@ -29,6 +31,10 @@ def prepare_robotwin_train_config(
     }
     if exp_name is not None:
         config_kwargs["exp_name"] = exp_name
+    if checkpoint_base_dir is not None:
+        config_kwargs["checkpoint_base_dir"] = checkpoint_base_dir
+    if num_train_steps is not None:
+        config_kwargs["num_train_steps"] = num_train_steps
     if overwrite is not None:
         config_kwargs["overwrite"] = overwrite
     if resume is not None:
