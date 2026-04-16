@@ -1,5 +1,6 @@
 import logging
 import math
+from typing import Literal
 
 import torch
 from torch import Tensor
@@ -9,6 +10,53 @@ import torch.nn.functional as F  # noqa: N812
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
+
+PrefixAttentionSchedule = Literal["linear", "exp", "ones", "zeros"]
+
+
+def get_prefix_weights(
+    start: int,
+    end: int,
+    total: int,
+    schedule: PrefixAttentionSchedule,
+    *,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> Tensor:
+    """Matches the weighting schedule used in the RTC reference implementation."""
+    start = min(start, end)
+    positions = torch.arange(total, device=device, dtype=torch.float32)
+
+    if schedule == "ones":
+        weights = torch.ones(total, device=device, dtype=torch.float32)
+    elif schedule == "zeros":
+        weights = (positions < float(start)).to(torch.float32)
+    elif schedule in {"linear", "exp"}:
+        weights = torch.clamp((float(start - 1) - positions) / float(end - start + 1) + 1.0, 0.0, 1.0)
+        if schedule == "exp":
+            weights = weights * torch.expm1(weights) / (math.e - 1.0)
+    else:
+        raise ValueError(f"Invalid prefix attention schedule: {schedule}")
+
+    weights = torch.where(
+        positions >= float(end),
+        torch.zeros_like(weights),
+        weights,
+    )
+    return weights.to(dtype=dtype)
+
+
+def get_rtc_guidance_weight(timestep: Tensor, max_guidance_weight: float) -> Tensor:
+    """Adapts the RTC guidance schedule to openpi's reverse-time flow parameterization."""
+    flow_time = 1.0 - timestep
+    c = torch.nan_to_num(
+        timestep / flow_time,
+        nan=max_guidance_weight,
+        posinf=max_guidance_weight,
+    )
+    inv_r2 = (flow_time.square() + timestep.square()) / timestep.square().clamp_min(1e-12)
+    max_weight = torch.as_tensor(max_guidance_weight, dtype=torch.float32, device=timestep.device)
+    return torch.minimum(c * inv_r2, max_weight)
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -427,6 +475,88 @@ class PI0Pytorch(nn.Module):
             x_t = x_t + dt * v_t
             time += dt
         return x_t
+
+    def realtime_action(
+        self,
+        device,
+        observation,
+        prev_action_chunk: Tensor,
+        inference_delay: int,
+        prefix_attention_horizon: int,
+        prefix_attention_schedule: PrefixAttentionSchedule = "exp",
+        max_guidance_weight: float = 5.0,
+        noise: Tensor | None = None,
+        num_steps: int = 10,
+    ) -> Tensor:
+        """RTC sampler adapted from the Physical Intelligence reference implementation."""
+        bsize = observation.state.shape[0]
+        if noise is None:
+            actions_shape = (bsize, self.config.action_horizon, self.config.action_dim)
+            noise = self.sample_noise(actions_shape, device)
+
+        prev_action_chunk = prev_action_chunk.to(device=device, dtype=torch.float32)
+        if prev_action_chunk.shape != (bsize, self.config.action_horizon, self.config.action_dim):
+            raise ValueError(
+                f"Expected prev_action_chunk with shape {(bsize, self.config.action_horizon, self.config.action_dim)}, "
+                f"got {tuple(prev_action_chunk.shape)}"
+            )
+
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
+        self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
+
+        with torch.no_grad():
+            _, past_key_values = self.paligemma_with_expert.forward(
+                attention_mask=prefix_att_2d_masks_4d,
+                position_ids=prefix_position_ids,
+                past_key_values=None,
+                inputs_embeds=[prefix_embs, None],
+                use_cache=True,
+            )
+
+        prefix_weights = get_prefix_weights(
+            inference_delay,
+            prefix_attention_horizon,
+            self.config.action_horizon,
+            prefix_attention_schedule,
+            device=device,
+        )[None, :, None]
+
+        dt = torch.tensor(-1.0 / num_steps, dtype=torch.float32, device=device)
+        x_t = noise.to(dtype=torch.float32, device=device)
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+        while time >= -dt / 2:
+            expanded_time = time.expand(bsize)
+            with torch.enable_grad():
+                x_t_var = x_t.detach().clone().requires_grad_(True)
+                v_t = self.denoise_step(
+                    state,
+                    prefix_pad_masks,
+                    past_key_values,
+                    x_t_var,
+                    expanded_time,
+                )
+                action_estimate = x_t_var - expanded_time[:, None, None] * v_t
+                error = (prev_action_chunk - action_estimate) * prefix_weights
+                pinv_correction = torch.autograd.grad(
+                    action_estimate,
+                    x_t_var,
+                    grad_outputs=error,
+                    retain_graph=False,
+                    create_graph=False,
+                )[0]
+
+            guidance_weight = get_rtc_guidance_weight(expanded_time, max_guidance_weight)[:, None, None]
+            corrected_velocity = v_t.detach() + guidance_weight * pinv_correction.detach()
+            x_t = x_t + dt * corrected_velocity
+            time += dt
+
+        return x_t.detach()
 
     def denoise_step(
         self,

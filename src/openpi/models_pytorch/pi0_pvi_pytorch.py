@@ -7,7 +7,10 @@ from torch import nn
 import torch.nn.functional as F  # noqa: N812
 from transformers.models.gemma import modeling_gemma
 
+from openpi.models_pytorch.pi0_pytorch import get_prefix_weights
+from openpi.models_pytorch.pi0_pytorch import get_rtc_guidance_weight
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
+from openpi.models_pytorch.pi0_pytorch import PrefixAttentionSchedule
 from openpi.models_pytorch.pi0_pytorch import make_att_2d_masks
 from openpi.models_pytorch.pvi_modules import DinoAuxEncoder
 from openpi.models_pytorch.pvi_modules import SigLIPAuxEncoder
@@ -536,6 +539,45 @@ class PI0PVI(PI0Pytorch):
         debug_metrics.update(layer_debug_metrics)
         return suffix_out, debug_metrics
 
+    def _pvi_denoise_step(
+        self,
+        state: torch.Tensor,
+        prefix_pad_masks: torch.Tensor,
+        main_prefix_hidden_states: tuple[torch.Tensor, ...],
+        aux_condition_tokens: torch.Tensor,
+        aux_prefix_pad_masks: torch.Tensor,
+        x_t: torch.Tensor,
+        timestep: torch.Tensor,
+    ) -> torch.Tensor:
+        suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, timestep)
+        suffix_embs = suffix_embs.to(dtype=self.copy_expert.layers[0].self_attn.q_proj.weight.dtype)
+
+        main_attention_mask, main_prefix_position_ids, main_suffix_position_ids = self._prepare_suffix_attention(
+            prefix_pad_masks,
+            suffix_pad_masks,
+            suffix_att_masks,
+        )
+        aux_attention_mask, aux_prefix_position_ids, aux_suffix_position_ids = self._prepare_suffix_attention(
+            aux_prefix_pad_masks,
+            suffix_pad_masks,
+            suffix_att_masks,
+        )
+
+        suffix_out, _ = self._run_pvi_action_expert(
+            main_prefix_hidden_states,
+            aux_condition_tokens,
+            main_attention_mask,
+            main_prefix_position_ids,
+            main_suffix_position_ids,
+            aux_attention_mask,
+            aux_prefix_position_ids,
+            aux_suffix_position_ids,
+            suffix_embs,
+            adarms_cond,
+            collect_debug_metrics=False,
+        )
+        return self.action_out_proj(suffix_out[:, -self.config.action_horizon :].to(dtype=torch.float32))
+
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
 
@@ -726,3 +768,82 @@ class PI0PVI(PI0Pytorch):
             x_t = x_t + dt * v_t
             time += dt
         return x_t
+
+    def realtime_action(
+        self,
+        device,
+        observation,
+        prev_action_chunk: torch.Tensor,
+        inference_delay: int,
+        prefix_attention_horizon: int,
+        prefix_attention_schedule: PrefixAttentionSchedule = "exp",
+        max_guidance_weight: float = 5.0,
+        noise: torch.Tensor | None = None,
+        num_steps: int = 10,
+    ) -> torch.Tensor:
+        bsize = observation.state.shape[0]
+        if noise is None:
+            noise = self.sample_noise((bsize, self.config.action_horizon, self.config.action_dim), device)
+
+        prev_action_chunk = prev_action_chunk.to(device=device, dtype=torch.float32)
+        if prev_action_chunk.shape != (bsize, self.config.action_horizon, self.config.action_dim):
+            raise ValueError(
+                f"Expected prev_action_chunk with shape {(bsize, self.config.action_horizon, self.config.action_dim)}, "
+                f"got {tuple(prev_action_chunk.shape)}"
+            )
+
+        images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+        prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
+        prefix_dtype = self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+        prefix_embs = prefix_embs.to(dtype=prefix_dtype)
+
+        with torch.no_grad():
+            aux_condition_tokens, aux_prefix_pad_masks, _ = self._embed_auxiliary_prefix(images, img_masks)
+            main_prefix_hidden_states = self._compute_prefix_hidden_states(
+                prefix_embs,
+                prefix_pad_masks,
+                prefix_att_masks,
+                requires_grad=False,
+            )
+
+        prefix_weights = get_prefix_weights(
+            inference_delay,
+            prefix_attention_horizon,
+            self.config.action_horizon,
+            prefix_attention_schedule,
+            device=device,
+        )[None, :, None]
+
+        dt = torch.tensor(-1.0 / num_steps, dtype=torch.float32, device=device)
+        x_t = noise.to(dtype=torch.float32, device=device)
+        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+
+        while time >= -dt / 2:
+            expanded_time = time.expand(bsize)
+            with torch.enable_grad():
+                x_t_var = x_t.detach().clone().requires_grad_(True)
+                v_t = self._pvi_denoise_step(
+                    state,
+                    prefix_pad_masks,
+                    main_prefix_hidden_states,
+                    aux_condition_tokens,
+                    aux_prefix_pad_masks,
+                    x_t_var,
+                    expanded_time,
+                )
+                action_estimate = x_t_var - expanded_time[:, None, None] * v_t
+                error = (prev_action_chunk - action_estimate) * prefix_weights
+                pinv_correction = torch.autograd.grad(
+                    action_estimate,
+                    x_t_var,
+                    grad_outputs=error,
+                    retain_graph=False,
+                    create_graph=False,
+                )[0]
+
+            guidance_weight = get_rtc_guidance_weight(expanded_time, max_guidance_weight)[:, None, None]
+            corrected_velocity = v_t.detach() + guidance_weight * pinv_correction.detach()
+            x_t = x_t + dt * corrected_velocity
+            time += dt
+
+        return x_t.detach()
