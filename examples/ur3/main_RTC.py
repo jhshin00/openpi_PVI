@@ -128,9 +128,18 @@ class _RTCPolicyAdapter:
             and hasattr(policy._model, "realtime_action")
         )
         if self._supports_policy_internals:
-            self._action_horizon = int(policy._model.action_horizon)
+            self._action_horizon = self._resolve_action_horizon(policy._model)
         else:
             self._action_horizon = -1
+
+    @staticmethod
+    def _resolve_action_horizon(model: Any) -> int:
+        value = getattr(model, "action_horizon", None)
+        if value is None and hasattr(model, "config"):
+            value = getattr(model.config, "action_horizon", None)
+        if value is None:
+            return -1
+        return int(value)
 
     @property
     def action_horizon(self) -> int:
@@ -255,6 +264,8 @@ def _validate_rtc_policy(args: Args, adapter: _RTCPolicyAdapter) -> None:
         raise ValueError(
             "The loaded policy does not support RTC. Use a PyTorch pi0/pi0.5 checkpoint with the new realtime sampler."
         )
+    if adapter.action_horizon <= 0:
+        raise ValueError("Could not determine the policy action horizon for RTC execution.")
     if args.replan_steps > adapter.action_horizon:
         raise ValueError(
             f"replan_steps={args.replan_steps} exceeds policy action_horizon={adapter.action_horizon}"

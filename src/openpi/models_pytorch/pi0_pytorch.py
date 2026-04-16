@@ -133,6 +133,11 @@ class PI0Pytorch(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        # Mirror the JAX BaseModel interface so higher-level inference code can
+        # read shape metadata without depending on backend-specific internals.
+        self.action_dim = config.action_dim
+        self.action_horizon = config.action_horizon
+        self.max_token_len = config.max_token_len
         self.pi05 = config.pi05
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
