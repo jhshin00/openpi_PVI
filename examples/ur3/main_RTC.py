@@ -141,6 +141,13 @@ class _RTCPolicyAdapter:
             return -1
         return int(value)
 
+    @staticmethod
+    def _prepare_prev_action_chunk(prev_action_chunk: np.ndarray, device: str) -> torch.Tensor:
+        tensor = torch.from_numpy(np.asarray(prev_action_chunk, dtype=np.float32)).to(device)
+        if tensor.ndim == 2:
+            tensor = tensor[None, ...]
+        return tensor
+
     @property
     def action_horizon(self) -> int:
         return self._action_horizon
@@ -228,7 +235,10 @@ class _RTCPolicyAdapter:
                 **sample_kwargs,
             )
         else:
-            prev_action_chunk = torch.from_numpy(realtime_kwargs.pop("prev_action_chunk")).to(self._policy._pytorch_device)
+            prev_action_chunk = self._prepare_prev_action_chunk(
+                realtime_kwargs.pop("prev_action_chunk"),
+                self._policy._pytorch_device,
+            )
             model_actions = self._policy._model.realtime_action(
                 self._policy._pytorch_device,
                 observation,

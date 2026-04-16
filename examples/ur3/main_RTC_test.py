@@ -2,6 +2,7 @@ import importlib.util
 import pathlib
 import sys
 
+import numpy as np
 import pytest
 
 
@@ -65,3 +66,19 @@ def test_validate_rtc_policy_rejects_unknown_horizon():
 
     with pytest.raises(ValueError, match="Could not determine the policy action horizon"):
         _rtc._validate_rtc_policy(args, adapter)
+
+
+def test_prepare_prev_action_chunk_adds_batch_dimension():
+    prev_chunk = np.zeros((50, 32), dtype=np.float32)
+
+    prepared = _rtc._RTCPolicyAdapter._prepare_prev_action_chunk(prev_chunk, "cpu")
+
+    assert tuple(prepared.shape) == (1, 50, 32)
+
+
+def test_prepare_prev_action_chunk_preserves_existing_batch_dimension():
+    prev_chunk = np.zeros((1, 50, 32), dtype=np.float32)
+
+    prepared = _rtc._RTCPolicyAdapter._prepare_prev_action_chunk(prev_chunk, "cpu")
+
+    assert tuple(prepared.shape) == (1, 50, 32)
