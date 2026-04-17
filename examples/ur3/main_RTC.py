@@ -60,6 +60,7 @@ _to_policy_observation = _base._to_policy_observation
 
 @dataclasses.dataclass
 class Args(_base.Args):
+    rtc_execute_horizon: int | None = None
     rtc_inference_delay_steps: int = 2
     rtc_dynamic_inference_delay: bool = True
     rtc_delay_history: int = 8
@@ -155,6 +156,26 @@ class _RTCPolicyAdapter:
     @property
     def supports_rtc(self) -> bool:
         return self._supports_rtc
+
+    def prepare_rtc_prefix(self, obs: dict[str, Any], prev_actions: np.ndarray) -> np.ndarray:
+        """Re-anchor the previous absolute chunk into the model action space for the current observation.
+
+        LeRobot's real-robot RTC path re-expresses leftover absolute actions relative to the current
+        robot state before feeding them back into relative-action policies. UR3 checkpoints use delta
+        joint actions, so conditioning directly on the stale previous model chunk can create boundary
+        oscillations. We mirror that behavior here by routing the absolute chunk through the policy's
+        input transforms with the current observation attached.
+        """
+        if not self._supports_policy_internals:
+            raise RuntimeError("RTC prefix preparation requires access to the policy transforms.")
+
+        inputs = jax.tree.map(lambda x: x, obs)
+        inputs["actions"] = np.asarray(prev_actions, dtype=np.float32)
+        transformed = self._policy._input_transform(inputs)
+        actions = np.asarray(transformed["actions"], dtype=np.float32)
+        if actions.ndim != 2:
+            raise ValueError(f"Expected transformed RTC prefix to be 2D, got shape {actions.shape}")
+        return actions
 
     def infer_initial(self, obs: dict[str, Any]) -> _RTCChunkResult:
         if not self._supports_policy_internals:
@@ -257,32 +278,60 @@ class _RTCPolicyAdapter:
         )
 
 
+def _resolve_execute_horizon(args: Args) -> int:
+    return int(args.rtc_execute_horizon if args.rtc_execute_horizon is not None else args.replan_steps)
+
+
+def _normalize_chunk_execution_mode(mode: str) -> str:
+    if mode == "per_step":
+        return "raw_chunk"
+    if mode == "chunk_endpoint":
+        return "endpoint_interp"
+    if mode in {"raw_chunk", "endpoint_interp"}:
+        return mode
+    raise ValueError(f"Unsupported chunk_execution: {mode}")
+
+
 def _validate_args(args: Args) -> None:
     _base._validate_args(args)
     if not args.async_inference:
         raise ValueError("RTC mode requires --async-inference true.")
+    if args.rtc_execute_horizon is not None and args.rtc_execute_horizon <= 0:
+        raise ValueError("rtc_execute_horizon must be positive when provided")
     if args.rtc_inference_delay_steps < 0:
         raise ValueError("rtc_inference_delay_steps must be non-negative")
     if args.rtc_delay_history <= 0:
         raise ValueError("rtc_delay_history must be positive")
     if args.rtc_max_guidance_weight <= 0:
         raise ValueError("rtc_max_guidance_weight must be positive")
+    _normalize_chunk_execution_mode(args.chunk_execution)
 
 
 def _validate_rtc_policy(args: Args, adapter: _RTCPolicyAdapter) -> None:
+    execute_horizon = _resolve_execute_horizon(args)
     if not adapter.supports_rtc:
         raise ValueError(
             "The loaded policy does not support RTC. Use a PyTorch pi0/pi0.5 checkpoint with the new realtime sampler."
         )
     if adapter.action_horizon <= 0:
         raise ValueError("Could not determine the policy action horizon for RTC execution.")
-    if args.replan_steps > adapter.action_horizon:
+    if execute_horizon > adapter.action_horizon:
         raise ValueError(
-            f"replan_steps={args.replan_steps} exceeds policy action_horizon={adapter.action_horizon}"
+            f"execute_horizon={execute_horizon} exceeds policy action_horizon={adapter.action_horizon}"
         )
-    if args.rtc_inference_delay_steps > args.replan_steps:
+    if args.rtc_inference_delay_steps > execute_horizon:
         raise ValueError(
-            f"RTC requires replan_steps >= rtc_inference_delay_steps, got {args.replan_steps} < {args.rtc_inference_delay_steps}"
+            f"RTC requires execute_horizon >= rtc_inference_delay_steps, got {execute_horizon} < {args.rtc_inference_delay_steps}"
+        )
+    overlap_horizon = adapter.action_horizon - execute_horizon
+    if execute_horizon > overlap_horizon:
+        logging.warning(
+            "RTC overlap_horizon=%d is shorter than execute_horizon=%d (action_horizon=%d). "
+            "This often makes raw per-step execution oscillate at chunk boundaries; prefer a smaller "
+            "execute horizon such as 20-25 for H=50, or use endpoint interpolation.",
+            overlap_horizon,
+            execute_horizon,
+            adapter.action_horizon,
         )
 
 
@@ -320,6 +369,8 @@ def _start_inference_worker(
     *,
     name: str,
 ) -> threading.Thread:
+    execute_horizon = _resolve_execute_horizon(args)
+
     def inference_worker() -> None:
         while not stop_event.is_set():
             try:
@@ -332,7 +383,7 @@ def _start_inference_worker(
                     request.policy_obs,
                     request.prev_model_actions,
                     inference_delay=request.inference_delay_steps,
-                    execute_horizon=args.replan_steps,
+                    execute_horizon=execute_horizon,
                     prefix_attention_schedule=args.rtc_prefix_attention_schedule,
                     max_guidance_weight=args.rtc_max_guidance_weight,
                 )
@@ -383,16 +434,15 @@ class _RTCPlanner:
         self._result_queue = result_queue
         self._error_queue = error_queue
         self._infer_thread = infer_thread
+        self._execute_horizon = _resolve_execute_horizon(args)
+        self._chunk_execution_mode = _normalize_chunk_execution_mode(args.chunk_execution)
 
         self._action_plan: collections.deque[np.ndarray] = collections.deque()
-        self._current_model_chunk: np.ndarray | None = None
         self._current_env_chunk: np.ndarray | None = None
-        self._next_model_chunk: np.ndarray | None = None
         self._next_env_chunk: np.ndarray | None = None
         self._iteration_index = 0
         self._iteration_progress = 0
         self._pending_iteration_index: int | None = None
-        self._last_request_step: int | None = None
         self._delay_tracker = _RTCDelayTracker(
             enabled=args.rtc_dynamic_inference_delay,
             bootstrap_steps=args.rtc_inference_delay_steps,
@@ -404,16 +454,18 @@ class _RTCPlanner:
     def bootstrap(self, obs: dict[str, Any], *, step: int) -> None:
         policy_obs = _base._to_policy_observation(obs, self._prompt)
         chunk = self._adapter.infer_initial(policy_obs)
-        self._current_model_chunk = np.asarray(chunk.model_actions, dtype=np.float32)
         self._current_env_chunk = np.asarray(chunk.actions, dtype=np.float32)
         logging.info(
-            "rtc_bootstrap episode=%d infer_ms=%.2f action_horizon=%d execute_horizon=%d initial_delay=%d dynamic_delay=%s",
+            "rtc_bootstrap episode=%d infer_ms=%.2f action_horizon=%d execute_horizon=%d overlap_horizon=%d "
+            "initial_delay=%d dynamic_delay=%s plan_mode=%s",
             self._episode_index,
             chunk.infer_ms,
             self._adapter.action_horizon,
-            self._args.replan_steps,
+            self._execute_horizon,
+            self._adapter.action_horizon - self._execute_horizon,
             self._args.rtc_inference_delay_steps,
             self._args.rtc_dynamic_inference_delay,
+            self._chunk_execution_mode,
         )
         self._prepare_iteration(obs, step=step, fallback_used=False)
 
@@ -438,18 +490,16 @@ class _RTCPlanner:
                 continue
 
             self._pending_iteration_index = None
-            self._last_request_step = None
             actual_delay = max(step - result.request_step, 0)
-            remaining_start = min(actual_delay, self._args.replan_steps)
-            self._next_model_chunk = _shift_chunk(result.chunk.model_actions, self._args.replan_steps)
-            self._next_env_chunk = _shift_chunk(result.chunk.actions, self._args.replan_steps)
+            remaining_start = min(actual_delay, self._execute_horizon)
+            self._next_env_chunk = _shift_chunk(result.chunk.actions, self._execute_horizon)
 
-            if remaining_start < self._args.replan_steps:
+            if remaining_start < self._execute_horizon:
                 current_state = _base._current_state_from_obs(obs)
                 remaining_plan = _build_window_plan(
-                    result.chunk.actions[remaining_start : self._args.replan_steps],
+                    result.chunk.actions[remaining_start : self._execute_horizon],
                     current_state,
-                    self._args.chunk_execution,
+                    self._chunk_execution_mode,
                 )
                 _replace_remaining_plan(self._action_plan, remaining_plan)
 
@@ -458,16 +508,16 @@ class _RTCPlanner:
                 actual_delay=actual_delay,
                 hz=self._args.hz,
             )
-            next_delay_steps, raw_next_delay_steps = self._delay_tracker.estimate(execute_horizon=self._args.replan_steps)
-            if observed_delay_steps > self._args.replan_steps and observed_delay_steps != self._last_observed_delay_warning:
+            next_delay_steps, raw_next_delay_steps = self._delay_tracker.estimate(execute_horizon=self._execute_horizon)
+            if observed_delay_steps > self._execute_horizon and observed_delay_steps != self._last_observed_delay_warning:
                 logging.warning(
                     "rtc_delay_exceeds_horizon episode=%d iteration=%d step=%d observed_delay=%d execute_horizon=%d; "
-                    "consider increasing replan_steps or reducing inference latency.",
+                    "consider increasing execute_horizon or reducing inference latency.",
                     self._episode_index,
                     self._iteration_index,
                     step,
                     observed_delay_steps,
-                    self._args.replan_steps,
+                    self._execute_horizon,
                 )
                 self._last_observed_delay_warning = observed_delay_steps
             logging.info(
@@ -509,15 +559,13 @@ class _RTCPlanner:
 
     def after_step(self, obs: dict[str, Any], *, step: int) -> None:
         self._iteration_progress += 1
-        if self._iteration_progress < self._args.replan_steps:
+        if self._iteration_progress < self._execute_horizon:
             return
 
-        fallback_used = self._next_model_chunk is None or self._next_env_chunk is None
+        fallback_used = self._next_env_chunk is None
         if fallback_used:
-            assert self._current_model_chunk is not None
             assert self._current_env_chunk is not None
-            self._current_model_chunk = _shift_chunk(self._current_model_chunk, self._args.replan_steps)
-            self._current_env_chunk = _shift_chunk(self._current_env_chunk, self._args.replan_steps)
+            self._current_env_chunk = _shift_chunk(self._current_env_chunk, self._execute_horizon)
             logging.warning(
                 "rtc_fallback episode=%d iteration=%d step=%d: next chunk was not ready; reusing shifted current chunk.",
                 self._episode_index,
@@ -525,10 +573,8 @@ class _RTCPlanner:
                 step,
             )
         else:
-            self._current_model_chunk = self._next_model_chunk
             self._current_env_chunk = self._next_env_chunk
 
-        self._next_model_chunk = None
         self._next_env_chunk = None
         self._iteration_index += 1
         self._prepare_iteration(obs, step=step + 1, fallback_used=fallback_used)
@@ -536,8 +582,8 @@ class _RTCPlanner:
     def _prepare_iteration(self, obs: dict[str, Any], *, step: int, fallback_used: bool) -> None:
         assert self._current_env_chunk is not None
         current_state = _base._current_state_from_obs(obs)
-        window = self._current_env_chunk[: self._args.replan_steps]
-        plan = _build_window_plan(window, current_state, self._args.chunk_execution)
+        window = self._current_env_chunk[: self._execute_horizon]
+        plan = _build_window_plan(window, current_state, self._chunk_execution_mode)
         self._iteration_progress = 0
         self._action_plan.clear()
         self._action_plan.extend(np.asarray(action, dtype=np.float32) for action in plan)
@@ -553,7 +599,7 @@ class _RTCPlanner:
                 self._iteration_index,
                 step,
                 fallback_used,
-                self._args.chunk_execution,
+                self._chunk_execution_mode,
                 np.array2string(plan[0], precision=4, suppress_small=True),
                 np.array2string(plan[-1], precision=4, suppress_small=True),
                 np.array2string(joint_delta[0], precision=4, suppress_small=True),
@@ -563,9 +609,9 @@ class _RTCPlanner:
             )
 
     def _dispatch_request(self, obs: dict[str, Any], *, step: int) -> None:
-        assert self._current_model_chunk is not None
+        assert self._current_env_chunk is not None
         inference_delay_steps, raw_inference_delay_steps = self._delay_tracker.estimate(
-            execute_horizon=self._args.replan_steps
+            execute_horizon=self._execute_horizon
         )
         if (
             raw_inference_delay_steps > inference_delay_steps
@@ -578,22 +624,22 @@ class _RTCPlanner:
                 self._iteration_index,
                 step,
                 raw_inference_delay_steps,
-                self._args.replan_steps,
+                self._execute_horizon,
             )
             self._last_clamped_delay_warning = raw_inference_delay_steps
         policy_obs = _base._to_policy_observation(obs, self._prompt)
+        prev_model_actions = self._adapter.prepare_rtc_prefix(policy_obs, self._current_env_chunk)
         request = _RTCInferenceRequest(
             episode_index=self._episode_index,
             iteration_index=self._iteration_index,
             request_step=step,
             inference_delay_steps=inference_delay_steps,
             policy_obs=policy_obs,
-            prev_model_actions=self._current_model_chunk,
+            prev_model_actions=prev_model_actions,
         )
         _base._drain_queue(self._request_queue)
         self._request_queue.put_nowait(request)
         self._pending_iteration_index = self._iteration_index
-        self._last_request_step = step
 
     def _ensure_worker(self) -> None:
         try:
@@ -725,23 +771,28 @@ def _run_single_episode_mode(args: Args) -> None:
     adapter = _RTCPolicyAdapter(policy)
     _validate_rtc_policy(args, adapter)
     env = _base._create_env(args)
+    execute_horizon = _resolve_execute_horizon(args)
+    chunk_execution_mode = _normalize_chunk_execution_mode(args.chunk_execution)
+    if args.rtc_execute_horizon is not None and args.replan_steps != execute_horizon:
+        logging.info(
+            "rtc_legacy_replan_steps_ignored legacy_replan_steps=%d execute_horizon=%d",
+            args.replan_steps,
+            execute_horizon,
+        )
 
     _base._log_video_config(args)
     logging.info(
-        "rtc_mode=enabled initial_delay=%d dynamic_delay=%s delay_history=%d execute_horizon=%d action_horizon=%d "
-        "schedule=%s max_guidance_weight=%.2f",
+        "rtc_mode=enabled initial_delay=%d dynamic_delay=%s delay_history=%d execute_horizon=%d overlap_horizon=%d "
+        "action_horizon=%d schedule=%s max_guidance_weight=%.2f plan_mode=%s",
         args.rtc_inference_delay_steps,
         args.rtc_dynamic_inference_delay,
         args.rtc_delay_history,
-        args.replan_steps,
+        execute_horizon,
+        adapter.action_horizon - execute_horizon,
         adapter.action_horizon,
         args.rtc_prefix_attention_schedule,
         args.rtc_max_guidance_weight,
-    )
-    logging.info(
-        "rtc_scheduler=enabled execute_horizon_is_replan_steps async_prefetch_steps_ignored=%d async_plan_guard_steps_ignored=%d",
-        args.async_prefetch_steps,
-        args.async_plan_guard_steps,
+        chunk_execution_mode,
     )
 
     request_queue: Queue[_RTCInferenceRequest] = Queue(maxsize=1)
@@ -822,25 +873,30 @@ def _run_interactive_mode(args: Args) -> None:
     adapter = _RTCPolicyAdapter(policy)
     _validate_rtc_policy(args, adapter)
     env = _base._create_env(args)
+    execute_horizon = _resolve_execute_horizon(args)
+    chunk_execution_mode = _normalize_chunk_execution_mode(args.chunk_execution)
+    if args.rtc_execute_horizon is not None and args.replan_steps != execute_horizon:
+        logging.info(
+            "rtc_legacy_replan_steps_ignored legacy_replan_steps=%d execute_horizon=%d",
+            args.replan_steps,
+            execute_horizon,
+        )
 
     _base._log_video_config(args)
     if args.video_filename is not None and args.save_video != "off":
         logging.info("interactive mode ignores --video-filename and uses episode_XXXX.mp4 names.")
     logging.info(
-        "rtc_mode=enabled initial_delay=%d dynamic_delay=%s delay_history=%d execute_horizon=%d action_horizon=%d "
-        "schedule=%s max_guidance_weight=%.2f",
+        "rtc_mode=enabled initial_delay=%d dynamic_delay=%s delay_history=%d execute_horizon=%d overlap_horizon=%d "
+        "action_horizon=%d schedule=%s max_guidance_weight=%.2f plan_mode=%s",
         args.rtc_inference_delay_steps,
         args.rtc_dynamic_inference_delay,
         args.rtc_delay_history,
-        args.replan_steps,
+        execute_horizon,
+        adapter.action_horizon - execute_horizon,
         adapter.action_horizon,
         args.rtc_prefix_attention_schedule,
         args.rtc_max_guidance_weight,
-    )
-    logging.info(
-        "rtc_scheduler=enabled execute_horizon_is_replan_steps async_prefetch_steps_ignored=%d async_plan_guard_steps_ignored=%d",
-        args.async_prefetch_steps,
-        args.async_plan_guard_steps,
+        chunk_execution_mode,
     )
 
     request_queue: Queue[_RTCInferenceRequest] = Queue(maxsize=1)

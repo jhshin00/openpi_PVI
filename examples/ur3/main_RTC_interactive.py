@@ -63,6 +63,8 @@ class InteractivePolicySession(_gui.InteractivePolicySession):
         self._policy = _backend.create_policy(self._args)
         self._rtc_adapter = _backend._RTCPolicyAdapter(self._policy)
         _backend._validate_rtc_policy(self._args, self._rtc_adapter)
+        execute_horizon = _backend._resolve_execute_horizon(self._args)
+        chunk_execution_mode = _backend._normalize_chunk_execution_mode(self._args.chunk_execution)
 
         self.append_log("Creating UR3 environment.")
         self._env = _backend._create_env(self._args)
@@ -70,17 +72,15 @@ class InteractivePolicySession(_gui.InteractivePolicySession):
         if self._args.video_filename is not None and self._args.save_video != "off":
             logging.info("GUI mode ignores --video-filename until a manual Save action is requested.")
         logging.info(
-            "rtc_mode=enabled configured_delay=%d execute_horizon=%d action_horizon=%d schedule=%s max_guidance_weight=%.2f",
+            "rtc_mode=enabled configured_delay=%d execute_horizon=%d overlap_horizon=%d action_horizon=%d "
+            "schedule=%s max_guidance_weight=%.2f plan_mode=%s",
             self._args.rtc_inference_delay_steps,
-            self._args.replan_steps,
+            execute_horizon,
+            self._rtc_adapter.action_horizon - execute_horizon,
             self._rtc_adapter.action_horizon,
             self._args.rtc_prefix_attention_schedule,
             self._args.rtc_max_guidance_weight,
-        )
-        logging.info(
-            "rtc_scheduler=enabled execute_horizon_is_replan_steps async_prefetch_steps_ignored=%d async_plan_guard_steps_ignored=%d",
-            self._args.async_prefetch_steps,
-            self._args.async_plan_guard_steps,
+            chunk_execution_mode,
         )
 
         self._start_inference_worker_if_needed()

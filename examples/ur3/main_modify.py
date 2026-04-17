@@ -262,9 +262,9 @@ def _get_frame(obs: dict[str, Any], *, source: Literal["cropped", "uncropped"]) 
 
 
 def _build_action_plan(chunk: np.ndarray, current_state: np.ndarray, mode: str) -> np.ndarray:
-    if mode == "per_step":
+    if mode in {"per_step", "raw_chunk"}:
         return chunk
-    if mode == "chunk_endpoint":
+    if mode in {"chunk_endpoint", "endpoint_interp"}:
         if len(chunk) == 0:
             return chunk
 

@@ -36,9 +36,9 @@ class _ModelWithConfigHorizon:
 
 
 class _Policy:
-    def __init__(self, model):
+    def __init__(self, model, *, input_transform=None):
         self._model = model
-        self._input_transform = lambda x: x
+        self._input_transform = input_transform or (lambda x: x)
         self._output_transform = lambda x: x
         self._sample_kwargs = {}
         self._is_pytorch_model = True
@@ -82,3 +82,36 @@ def test_prepare_prev_action_chunk_preserves_existing_batch_dimension():
     prepared = _rtc._RTCPolicyAdapter._prepare_prev_action_chunk(prev_chunk, "cpu")
 
     assert tuple(prepared.shape) == (1, 50, 32)
+
+
+def test_prepare_rtc_prefix_reanchors_absolute_actions_to_current_state():
+    state = np.array([0.4, -0.2, 0.1, -0.3, 0.2, -0.1, 1.0], dtype=np.float32)
+    absolute_actions = np.array(
+        [
+            [0.5, -0.1, 0.2, -0.2, 0.4, 0.0, 1.0],
+            [0.7, 0.0, 0.3, -0.1, 0.5, 0.1, 0.0],
+        ],
+        dtype=np.float32,
+    )
+
+    def _input_transform(data):
+        transformed = dict(data)
+        actions = np.asarray(transformed["actions"], dtype=np.float32).copy()
+        actions[:, :6] -= np.asarray(transformed["observation/state"], dtype=np.float32)[:6]
+        transformed["actions"] = actions
+        return transformed
+
+    adapter = _rtc._RTCPolicyAdapter(_Policy(_ModelWithDirectHorizon(), input_transform=_input_transform))
+    prepared = adapter.prepare_rtc_prefix(
+        {
+            "observation/state": state,
+            "observation/base_image": np.zeros((4, 4, 3), dtype=np.uint8),
+            "observation/wrist_image": np.zeros((4, 4, 3), dtype=np.uint8),
+            "prompt": "test",
+        },
+        absolute_actions,
+    )
+
+    expected = absolute_actions.copy()
+    expected[:, :6] -= state[:6]
+    assert np.allclose(prepared, expected)

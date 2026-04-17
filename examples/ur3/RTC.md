@@ -42,8 +42,9 @@ UR3 쪽 구현은 RTC를 두 레이어로 나눠 붙였다.
 
 2. 실행 스케줄러 레이어
    - `main_RTC.py`의 `_RTCPlanner`가 "현재 실행 중인 chunk"와 "다음 chunk"를 관리한다.
-   - `replan_steps`를 paper의 `execute_horizon`처럼 사용한다.
-   - 한 iteration 동안 `replan_steps`개를 실행하는 동안, background thread에서 다음 chunk를 미리 만든다.
+   - paper의 `execute_horizon` 개념을 직접 사용한다.
+   - CLI에서는 `rtc_execute_horizon`이 우선이고, 비워두면 legacy `replan_steps`를 fallback으로 쓴다.
+   - 한 iteration 동안 `execute_horizon`개를 실행하는 동안, background thread에서 다음 chunk를 미리 만든다.
 
 정리하면:
 
@@ -64,6 +65,10 @@ UR3 쪽 구현은 RTC를 두 레이어로 나눠 붙였다.
 
 기존 `Args`에 RTC 파라미터를 추가했다.
 
+- `rtc_execute_horizon`
+  - RTC에서 실제로 한 iteration 동안 실행할 step 수
+  - paper / LeRobot docs의 `execution_horizon`과 같은 의미
+  - 지정하지 않으면 legacy `replan_steps` 값을 사용한다.
 - `rtc_inference_delay_steps`
   - RTC가 처음 사용할 delay step 값
   - dynamic delay가 켜져 있으면 초기값이자 최소값처럼 동작한다.
@@ -80,8 +85,10 @@ UR3 쪽 구현은 RTC를 두 레이어로 나눠 붙였다.
 또한 RTC 모드에서는:
 
 - `async_inference=True`가 강제된다.
-- `replan_steps >= rtc_inference_delay_steps`여야 한다.
-- `replan_steps <= action_horizon`이어야 한다.
+- `execute_horizon >= rtc_inference_delay_steps`여야 한다.
+- `execute_horizon <= action_horizon`이어야 한다.
+- 특히 `action_horizon - execute_horizon`이 실제 prefix guidance가 걸리는 길이이므로,
+  `execute_horizon`이 너무 크면 raw chunk 실행(`per_step` / `raw_chunk`)에서 chunk boundary 진동이 잘 생긴다.
 
 ## 4. `_RTCPolicyAdapter`: policy와 RTC sampler를 연결하는 층
 
@@ -97,16 +104,18 @@ UR3 쪽 구현은 RTC를 두 레이어로 나눠 붙였다.
    - `infer_realtime()`
    - `model.realtime_action(...)`을 호출해서 이전 chunk와 이어지는 새 chunk를 만든다.
 
+3. RTC prefix 재정렬
+   - `prepare_rtc_prefix()`
+   - 현재 observation 기준으로 이전 absolute chunk를 다시 model-space action으로 바꾼다.
+   - 이 단계는 LeRobot real-robot RTC가 relative-action policy의 leftover action을 현재 state 기준으로 다시 anchor하는 방식과 같은 목적이다.
+
 여기서 중요한 점:
 
-- `model_actions`
-  - output transform 이전의 model-space action chunk
-  - RTC conditioning은 이것을 사용한다.
 - `actions`
   - output transform 이후 실제 UR3에 보낼 action chunk
   - 실행은 이것을 사용한다.
 
-즉 RTC는 "모델이 실제로 생성한 latent/action space chunk"를 기준으로 연결성을 맞추고, UR3 실행은 기존 output transform을 거친 결과를 그대로 따른다.
+UR3는 delta joint action을 학습했기 때문에, "이전 chunk를 다시 조건으로 넣을 때"는 현재 joint state 기준으로 model-space로 다시 표현해야 한다. 그렇지 않으면 stale delta를 prefix로 강제하게 되어 경계에서 backward/forward oscillation이 생길 수 있다.
 
 ## 5. 모델 쪽 RTC 구현
 
@@ -160,12 +169,8 @@ UR3에서는 `_RTCPlanner`가 이 역할을 한다.
 
 planner가 관리하는 상태는 대략 아래와 같다.
 
-- `current_model_chunk`
-  - 현재 iteration의 기준이 되는 model-space chunk
 - `current_env_chunk`
   - 실제 실행용 env-space chunk
-- `next_model_chunk`
-  - 다음 iteration에 쓸 다음 model-space chunk
 - `next_env_chunk`
   - 다음 iteration에 쓸 다음 env-space chunk
 - `action_plan`
@@ -176,12 +181,12 @@ planner가 관리하는 상태는 대략 아래와 같다.
 episode 시작 시:
 
 1. `infer_initial()`로 첫 full chunk를 만든다.
-2. 이 chunk의 앞 `replan_steps`개를 현재 iteration 실행 plan으로 만든다.
+2. 이 chunk의 앞 `execute_horizon`개를 현재 iteration 실행 plan으로 만든다.
 3. 동시에 background worker에 "다음 chunk를 RTC로 만들어라"는 요청을 보낸다.
 
 ### 한 iteration 동안
 
-iteration은 `replan_steps` step 길이다.
+iteration은 `execute_horizon` step 길이다.
 
 iteration 중에는:
 
@@ -192,24 +197,24 @@ iteration 중에는:
    - `timing_delay = ceil(infer_ms / control_period)`를 계산한다.
    - `observed_delay = max(actual_delay, timing_delay)`를 최근 history에 넣는다.
    - 이미 지나간 구간은 버린다.
-   - 남은 `result.chunk.actions[actual_delay : replan_steps]`를 현재 observation 기준으로 다시 실행 plan으로 바꿔 넣는다.
-   - 동시에 `next_model_chunk`, `next_env_chunk`를 다음 iteration용으로 준비한다.
+   - 남은 `result.chunk.actions[actual_delay : execute_horizon]`를 현재 observation 기준으로 다시 실행 plan으로 바꿔 넣는다.
+   - 동시에 `next_env_chunk`를 다음 iteration용으로 준비한다.
 
 여기서 `chunk_execution`은 여전히 살아 있다.
 
-- `per_step`: 모델 chunk를 그대로 step-by-step 실행
-- `chunk_endpoint`: 앞 `replan_steps` 구간을 endpoint interpolation으로 execution plan으로 변환
+- `raw_chunk` (`per_step` alias): 모델 chunk를 그대로 step-by-step 실행
+- `endpoint_interp` (`chunk_endpoint` alias): 앞 `execute_horizon` 구간을 endpoint interpolation으로 execution plan으로 변환
 
 즉 RTC는 "chunk 생성 방식"을 바꾸고, execution shaping은 기존 UR3 로직을 그대로 재사용한다.
 
 ### iteration 경계
 
-`replan_steps`개를 다 실행하면:
+`execute_horizon`개를 다 실행하면:
 
 1. 새 chunk가 준비되어 있으면
    - `current_* = next_*`로 교체
 2. 아직 준비되지 않았으면
-   - 현재 chunk를 `replan_steps`만큼 left shift해서 fallback으로 사용
+   - 현재 chunk를 `execute_horizon`만큼 left shift해서 fallback으로 사용
 
 shift는 `_shift_chunk()`가 처리한다.
 
