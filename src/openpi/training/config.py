@@ -691,7 +691,7 @@ _CONFIGS = [
             pvi_injector_init_std=0.0,
         ),
         data=LeRobotUR3DataConfig(
-            repo_id="ur3_dataset_almonds_0415",
+            repo_id="ur3_dataset_almonds_4obj",
             lerobot_root="./datasets",
             assets=AssetsConfig(assets_dir="./assets/pi05_ur3_pvi"),
             base_config=DataConfig(prompt_from_task=True),
@@ -714,7 +714,7 @@ _CONFIGS = [
         overwrite=False,
         resume=False,
         wandb_enabled=True,
-        exp_name="pi05_ur3_pvi_dinov2_h50_almonds_0415",
+        exp_name="pi05_ur3_pvi_dinov2_h50_almonds_4obj_0417",
     ),
     TrainConfig(
         name="pi05_ur3_pvi_dinov2_h50_infer",

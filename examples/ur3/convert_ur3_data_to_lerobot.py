@@ -56,6 +56,7 @@ pick up the pear
 
 import dataclasses
 import json
+import logging
 from pathlib import Path
 import re
 import shutil
@@ -122,6 +123,11 @@ class DatasetConfig:
 
 
 DEFAULT_DATASET_CONFIG = DatasetConfig()
+logger = logging.getLogger(__name__)
+
+
+class InvalidEpisodeError(ValueError):
+    """Raised when a raw UR3 episode cannot be converted safely."""
 
 
 def _decode_task(task_value: Any) -> str:
@@ -160,6 +166,16 @@ def _find_hdf5_files(raw_dir: Path) -> list[Path]:
     raise FileNotFoundError(f"No UR3 hdf5 episodes found under {raw_dir}")
 
 
+def _find_first_readable_hdf5_file(hdf5_files: list[Path]) -> Path:
+    for episode_path in hdf5_files:
+        try:
+            with h5py.File(episode_path, "r"):
+                return episode_path
+        except OSError:
+            continue
+    raise FileNotFoundError("No readable HDF5 episodes found in the provided raw directory.")
+
+
 def _detect_format(episode_path: Path) -> EpisodeFormat:
     with h5py.File(episode_path, "r") as episode:
         if "/data/joint_positions" in episode and "/data/joint_actions" in episode:
@@ -188,6 +204,21 @@ def _load_images(dataset: h5py.Dataset) -> np.ndarray:
         images = np.transpose(images, (0, 2, 3, 1))
 
     return images
+
+
+def _validate_joint_array(array: np.ndarray, key: str, episode_path: Path, *, max_abs_joint_value: float) -> None:
+    if not np.isfinite(array).all():
+        bad_count = int(array.size - np.isfinite(array).sum())
+        raise InvalidEpisodeError(
+            f"Non-finite values found in {key} of {episode_path} (bad_count={bad_count})."
+        )
+
+    max_abs = float(np.max(np.abs(array))) if array.size else 0.0
+    if max_abs > max_abs_joint_value:
+        raise InvalidEpisodeError(
+            f"Unreasonable magnitude in {key} of {episode_path} "
+            f"(max_abs={max_abs:.3e}, allowed<={max_abs_joint_value:.3e})."
+        )
 
 
 def _normalize_task_from_path_name(name: str) -> str:
@@ -407,14 +438,24 @@ def load_raw_episode_data(
     default_task: str | None,
     task_mapping: dict[str, str],
     dataset_config: DatasetConfig,
+    max_abs_joint_value: float,
 ) -> tuple[dict[str, np.ndarray], torch.Tensor, torch.Tensor, str, torch.Tensor | None, torch.Tensor | None]:
     image_keys = LEGACY_CAMERA_KEYS if episode_format == "legacy" else GELLO_CAMERA_KEYS
     frame_slice = slice(None, None, dataset_config.frame_stride)
 
-    with h5py.File(episode_path, "r") as episode:
+    try:
+        episode = h5py.File(episode_path, "r")
+    except OSError as exc:
+        raise InvalidEpisodeError(f"Failed to open HDF5 episode {episode_path}: {exc}") from exc
+
+    with episode:
         if episode_format == "gello":
-            state = torch.from_numpy(episode["/data/joint_positions"][frame_slice].astype(np.float32))
-            actions = torch.from_numpy(episode["/data/joint_actions"][frame_slice].astype(np.float32))
+            state_np = episode["/data/joint_positions"][frame_slice]
+            actions_np = episode["/data/joint_actions"][frame_slice]
+            _validate_joint_array(state_np, "/data/joint_positions", episode_path, max_abs_joint_value=max_abs_joint_value)
+            _validate_joint_array(actions_np, "/data/joint_actions", episode_path, max_abs_joint_value=max_abs_joint_value)
+            state = torch.from_numpy(state_np.astype(np.float32))
+            actions = torch.from_numpy(actions_np.astype(np.float32))
 
             velocity = None
             for key in ("/data/joint_velocities", "/data/qvel"):
@@ -426,8 +467,12 @@ def load_raw_episode_data(
             if "/data/effort" in episode:
                 effort = torch.from_numpy(episode["/data/effort"][frame_slice].astype(np.float32))
         else:
-            state = torch.from_numpy(episode["/observation/qpos"][frame_slice].astype(np.float32))
-            actions = torch.from_numpy(episode["/action"][frame_slice].astype(np.float32))
+            state_np = episode["/observation/qpos"][frame_slice]
+            actions_np = episode["/action"][frame_slice]
+            _validate_joint_array(state_np, "/observation/qpos", episode_path, max_abs_joint_value=max_abs_joint_value)
+            _validate_joint_array(actions_np, "/action", episode_path, max_abs_joint_value=max_abs_joint_value)
+            state = torch.from_numpy(state_np.astype(np.float32))
+            actions = torch.from_numpy(actions_np.astype(np.float32))
 
             velocity = None
             if "/observation/qvel" in episode:
@@ -501,20 +546,31 @@ def populate_dataset(
     task_mapping: dict[str, str],
     dataset_config: DatasetConfig,
     episodes: list[int] | None = None,
+    skip_invalid_episodes: bool = False,
+    max_abs_joint_value: float = 1e3,
 ) -> LeRobotDataset:
     if episodes is None:
         episodes = list(range(len(hdf5_files)))
 
+    skipped_episodes: list[tuple[Path, str]] = []
     for episode_index in tqdm.tqdm(episodes, desc="Converting UR3 episodes"):
         episode_path = hdf5_files[episode_index]
-        images_per_camera, state, actions, task, velocity, effort = load_raw_episode_data(
-            episode_path,
-            raw_dir,
-            episode_format,
-            default_task=default_task,
-            task_mapping=task_mapping,
-            dataset_config=dataset_config,
-        )
+        try:
+            images_per_camera, state, actions, task, velocity, effort = load_raw_episode_data(
+                episode_path,
+                raw_dir,
+                episode_format,
+                default_task=default_task,
+                task_mapping=task_mapping,
+                dataset_config=dataset_config,
+                max_abs_joint_value=max_abs_joint_value,
+            )
+        except InvalidEpisodeError as exc:
+            if not skip_invalid_episodes:
+                raise
+            skipped_episodes.append((episode_path, str(exc)))
+            tqdm.tqdm.write(f"[skip-invalid] {exc}")
+            continue
 
         for frame_index in range(state.shape[0]):
             frame = {
@@ -535,6 +591,11 @@ def populate_dataset(
 
         dataset.save_episode()
 
+    if skipped_episodes:
+        logger.warning("Skipped %d invalid episodes during conversion.", len(skipped_episodes))
+        for episode_path, reason in skipped_episodes:
+            logger.warning("  %s", reason)
+
     return dataset
 
 
@@ -550,6 +611,8 @@ def main(
     push_to_hub: bool = False,
     mode: Literal["video", "image"] = "image",
     dataset_config: DatasetConfig = DEFAULT_DATASET_CONFIG,
+    skip_invalid_episodes: bool = False,
+    max_abs_joint_value: float = 1e3,
 ):
     raw_dir = raw_dir.expanduser()
     if not raw_dir.exists():
@@ -560,9 +623,10 @@ def main(
         raise FileNotFoundError(f"Raw UR3 directory does not exist: {raw_dir}")
 
     hdf5_files = _find_hdf5_files(raw_dir)
-    episode_format = _detect_format(hdf5_files[0])
+    first_readable_file = _find_first_readable_hdf5_file(hdf5_files)
+    episode_format = _detect_format(first_readable_file)
     task_mapping = _load_task_mapping(task_map_json)
-    image_shapes = _peek_image_shapes(hdf5_files[0], episode_format)
+    image_shapes = _peek_image_shapes(first_readable_file, episode_format)
 
     dataset = create_empty_dataset(
         repo_id,
@@ -583,6 +647,8 @@ def main(
         task_mapping=task_mapping,
         dataset_config=dataset_config,
         episodes=episodes,
+        skip_invalid_episodes=skip_invalid_episodes,
+        max_abs_joint_value=max_abs_joint_value,
     )
 
     if push_to_hub:
