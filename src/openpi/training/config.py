@@ -761,7 +761,7 @@ _CONFIGS = [
             discrete_state_input=False,
             use_pvi=True,
             pvi_aux_encoder_type="hpr",
-            pvi_aux_encoder_name="hpr_checkpoints/hpr_new_checkpoint.ckpt",
+            pvi_aux_encoder_name="hpr_checkpoints/hpr_fullfinetune_base_lang_trace_negative_mod.ckpt",
             pvi_injector_init_std=0.0,
         ),
         data=LeRobotUR3DataConfig(
