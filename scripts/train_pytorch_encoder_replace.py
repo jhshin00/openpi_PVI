@@ -36,6 +36,7 @@ except ModuleNotFoundError:
 
 GRAD_NORM_LOG_EXACT_TARGETS = {
     "grad_norm/image_token_adapter.projector.weight": "image_token_adapter.projector.weight",
+    "grad_norm/image_token_adapter.output_projector.weight": "image_token_adapter.output_projector.weight",
     "grad_norm/action_out_proj.weight": "action_out_proj.weight",
     "grad_norm/time_mlp_out.weight": "time_mlp_out.weight",
     "grad_norm/action_expert.layer0.q_proj.weight": (
@@ -303,6 +304,7 @@ def build_model_config(config: _config.TrainConfig) -> openpi.models.pi0_config.
                 "facebook/dinov2-base",
             ),
             encoder_replace_variant=getattr(config.model, "encoder_replace_variant", "v1"),
+            encoder_replace_adapter_type=getattr(config.model, "encoder_replace_adapter_type", "mlp2"),
             encoder_replace_lora_rank=getattr(config.model, "encoder_replace_lora_rank", 16),
             encoder_replace_lora_alpha=getattr(config.model, "encoder_replace_lora_alpha", 16.0),
             encoder_replace_action_lora_rank=getattr(config.model, "encoder_replace_action_lora_rank", 32),

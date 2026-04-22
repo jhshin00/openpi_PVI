@@ -28,6 +28,7 @@ class Pi0Config(_model.BaseModelConfig):
     encoder_replace_encoder_type: str = "dinov2"
     encoder_replace_encoder_name: str = "facebook/dinov2-base"
     encoder_replace_variant: Literal["v1", "v2", "v3"] = "v1"
+    encoder_replace_adapter_type: Literal["linear", "mlp2"] = "mlp2"
     encoder_replace_lora_rank: int = 16
     encoder_replace_lora_alpha: float = 16.0
     encoder_replace_action_lora_rank: int = 32
@@ -73,6 +74,12 @@ class Pi0Config(_model.BaseModelConfig):
             raise ValueError(
                 f"encoder_replace_variant must be one of {sorted(valid_encoder_replace_variants)}, "
                 f"got {self.encoder_replace_variant!r}"
+            )
+        valid_encoder_replace_adapter_types = {"linear", "mlp2"}
+        if self.encoder_replace_adapter_type not in valid_encoder_replace_adapter_types:
+            raise ValueError(
+                "encoder_replace_adapter_type must be one of "
+                f"{sorted(valid_encoder_replace_adapter_types)}, got {self.encoder_replace_adapter_type!r}"
             )
         if self.encoder_replace_variant != "v1" and not self.use_encoder_replace:
             raise ValueError("encoder_replace_variant v2/v3 requires use_encoder_replace=True")

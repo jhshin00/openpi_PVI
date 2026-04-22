@@ -22,18 +22,27 @@ logger = logging.getLogger("openpi")
 class VisionTokenAdapter(nn.Module):
     """Map frozen replacement-encoder tokens into the PaliGemma image-prefix token space."""
 
-    def __init__(self, input_dim: int, output_dim: int, target_tokens_per_view: int):
+    def __init__(self, input_dim: int, output_dim: int, target_tokens_per_view: int, *, adapter_type: str = "mlp2"):
         super().__init__()
         target_grid_size = math.isqrt(target_tokens_per_view)
         if target_grid_size * target_grid_size != target_tokens_per_view:
             raise ValueError(f"target_tokens_per_view must be a square grid, got {target_tokens_per_view}")
+        if adapter_type not in {"linear", "mlp2"}:
+            raise ValueError(f"Unknown VisionTokenAdapter adapter_type: {adapter_type!r}")
 
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.target_tokens_per_view = target_tokens_per_view
         self.target_grid_size = target_grid_size
+        self.adapter_type = adapter_type
         self.input_norm = nn.LayerNorm(input_dim)
         self.projector = nn.Linear(input_dim, output_dim)
+        if adapter_type == "mlp2":
+            self.activation = nn.GELU()
+            self.output_projector = nn.Linear(output_dim, output_dim)
+        else:
+            self.activation = nn.Identity()
+            self.output_projector = nn.Identity()
 
     @staticmethod
     def _square_grid_size(token_count: int) -> int | None:
@@ -52,6 +61,13 @@ class VisionTokenAdapter(nn.Module):
             nn.init.normal_(self.projector.weight, mean=0.0, std=reference_std)
         if self.projector.bias is not None:
             nn.init.zeros_(self.projector.bias)
+        if isinstance(self.output_projector, nn.Linear):
+            if reference_std is None or reference_std <= 0:
+                nn.init.xavier_uniform_(self.output_projector.weight)
+            else:
+                nn.init.normal_(self.output_projector.weight, mean=0.0, std=reference_std)
+            if self.output_projector.bias is not None:
+                nn.init.zeros_(self.output_projector.bias)
 
     def tokens_to_view_grid(self, aux_features: torch.Tensor, patches_per_view: int) -> tuple[torch.Tensor, int, bool]:
         if aux_features.ndim != 3:
@@ -106,7 +122,8 @@ class VisionTokenAdapter(nn.Module):
 
         view_tokens = view_tokens.reshape(batch_size, num_views * self.target_tokens_per_view, hidden_size)
         view_tokens = view_tokens.to(dtype=self.projector.weight.dtype)
-        return self.projector(self.input_norm(view_tokens))
+        projected = self.projector(self.input_norm(view_tokens))
+        return self.output_projector(self.activation(projected))
 
 
 class PI0EncoderReplace(PI0Pytorch):
@@ -141,6 +158,7 @@ class PI0EncoderReplace(PI0Pytorch):
             self.replacement_encoder.hidden_size,
             target_hidden_size,
             target_tokens_per_view,
+            adapter_type=getattr(config, "encoder_replace_adapter_type", "mlp2"),
         )
         reference_std = (
             self.paligemma_with_expert.paligemma.model.multi_modal_projector.linear.weight.detach().float().std().item()
@@ -151,12 +169,13 @@ class PI0EncoderReplace(PI0Pytorch):
 
         logger.info(
             "Initialized PI0EncoderReplace: encoder_type=%s variant=%s hidden=%s target_tokens_per_view=%s "
-            "target_hidden=%s",
+            "target_hidden=%s adapter_type=%s",
             getattr(config, "encoder_replace_encoder_type", "dinov2"),
             self.encoder_replace_variant,
             self.replacement_encoder.hidden_size,
             target_tokens_per_view,
             target_hidden_size,
+            getattr(config, "encoder_replace_adapter_type", "mlp2"),
         )
 
     @staticmethod
@@ -384,5 +403,6 @@ class PI0EncoderReplace(PI0Pytorch):
             "encoder_replace/dropped_cls_token": dropped_cls,
             "encoder_replace/target_tokens_per_view": self.image_token_adapter.target_tokens_per_view,
             "encoder_replace/target_hidden_size": self.image_token_adapter.output_dim,
+            "encoder_replace/adapter_type_mlp2": self.image_token_adapter.adapter_type == "mlp2",
             "encoder_replace/image_prefix_tokens": image_embeddings.shape[1],
         }
