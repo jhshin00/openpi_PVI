@@ -49,7 +49,10 @@ GRAD_NORM_LOG_DYNAMIC_TARGETS = {
         (".q_proj.lora_b", ".query.lora_b", ".lora_b"),
     ),
     "grad_norm/vlm_lora.layer0.q_proj.lora_b": (
-        ("paligemma_with_expert.paligemma.language_model.",),
+        (
+            "paligemma_with_expert.paligemma.language_model.",
+            "paligemma_with_expert.paligemma.model.language_model.",
+        ),
         (".q_proj.lora_b", ".lora_b"),
     ),
     "grad_norm/action_expert_lora.layer0.q_proj.lora_b": (

@@ -6,6 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F  # noqa: N812
 
+from openpi.models_pytorch.lora import apply_gemma_lora_to_linear_modules
 from openpi.models_pytorch.lora import apply_lora_to_linear_modules
 from openpi.models_pytorch.lora import lora_parameter_names
 from openpi.models_pytorch.pi0_pytorch import PI0Pytorch
@@ -114,15 +115,6 @@ class PI0EncoderReplace(PI0Pytorch):
         "image_token_adapter.",
     )
     LORA_VARIANTS: ClassVar[set[str]] = {"v2", "v3"}
-    GEMMA_LORA_TARGET_SUFFIXES: ClassVar[tuple[str, ...]] = (
-        "q_proj",
-        "k_proj",
-        "v_proj",
-        "o_proj",
-        "gate_proj",
-        "up_proj",
-        "down_proj",
-    )
     VISION_LORA_TARGET_SUFFIXES: ClassVar[tuple[str, ...]] = (
         "q_proj",
         "k_proj",
@@ -234,17 +226,15 @@ class PI0EncoderReplace(PI0Pytorch):
             rank=rank,
             alpha=alpha,
         )
-        vlm_lora_modules = apply_lora_to_linear_modules(
+        vlm_lora_modules = apply_gemma_lora_to_linear_modules(
             self.paligemma_with_expert.paligemma.language_model,
-            target_suffixes=self.GEMMA_LORA_TARGET_SUFFIXES,
             rank=rank,
             alpha=alpha,
         )
         action_lora_modules: list[str] = []
         if self.encoder_replace_variant == "v3":
-            action_lora_modules = apply_lora_to_linear_modules(
+            action_lora_modules = apply_gemma_lora_to_linear_modules(
                 self.paligemma_with_expert.gemma_expert.model,
-                target_suffixes=self.GEMMA_LORA_TARGET_SUFFIXES,
                 rank=action_rank,
                 alpha=action_alpha,
             )
