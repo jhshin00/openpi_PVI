@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import flax.nnx as nnx
 import jax
@@ -24,6 +24,14 @@ class Pi0Config(_model.BaseModelConfig):
     pvi_aux_encoder_type: str = "dinov2"  # "dinov2", "siglip", "hpr", "clip", "r3m" 중 선택
     pvi_aux_encoder_name: str = "facebook/dinov2-base"  # 모델명 또는 HPR 체크포인트 경로
     pvi_injector_init_std: float = 0.0
+    use_encoder_replace: bool = False
+    encoder_replace_encoder_type: str = "dinov2"
+    encoder_replace_encoder_name: str = "facebook/dinov2-base"
+    encoder_replace_variant: Literal["v1", "v2", "v3"] = "v1"
+    encoder_replace_lora_rank: int = 16
+    encoder_replace_lora_alpha: float = 16.0
+    encoder_replace_action_lora_rank: int = 32
+    encoder_replace_action_lora_alpha: float = 32.0
 
     # Set the model specific defaults.
     action_dim: int = 32
@@ -52,6 +60,30 @@ class Pi0Config(_model.BaseModelConfig):
             ]
         if self.pvi_injector_init_std < 0:
             raise ValueError("pvi_injector_init_std must be non-negative")
+        if self.use_pvi and self.use_encoder_replace:
+            raise ValueError("use_pvi and use_encoder_replace are mutually exclusive")
+        valid_encoder_replace_types = {"dinov2", "dino", "siglip", "hpr", "clip", "r3m"}
+        if self.encoder_replace_encoder_type not in valid_encoder_replace_types:
+            raise ValueError(
+                f"encoder_replace_encoder_type must be one of {sorted(valid_encoder_replace_types)}, "
+                f"got {self.encoder_replace_encoder_type!r}"
+            )
+        valid_encoder_replace_variants = {"v1", "v2", "v3"}
+        if self.encoder_replace_variant not in valid_encoder_replace_variants:
+            raise ValueError(
+                f"encoder_replace_variant must be one of {sorted(valid_encoder_replace_variants)}, "
+                f"got {self.encoder_replace_variant!r}"
+            )
+        if self.encoder_replace_variant != "v1" and not self.use_encoder_replace:
+            raise ValueError("encoder_replace_variant v2/v3 requires use_encoder_replace=True")
+        if self.encoder_replace_lora_rank <= 0:
+            raise ValueError("encoder_replace_lora_rank must be positive")
+        if self.encoder_replace_lora_alpha <= 0:
+            raise ValueError("encoder_replace_lora_alpha must be positive")
+        if self.encoder_replace_action_lora_rank <= 0:
+            raise ValueError("encoder_replace_action_lora_rank must be positive")
+        if self.encoder_replace_action_lora_alpha <= 0:
+            raise ValueError("encoder_replace_action_lora_alpha must be positive")
 
     @property
     @override

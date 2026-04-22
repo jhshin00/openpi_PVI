@@ -472,6 +472,12 @@ class PI0Pytorch(nn.Module):
 
 
 def create_model(config):
+    if getattr(config, "use_encoder_replace", False):
+        if getattr(config, "use_pvi", False):
+            raise ValueError("use_encoder_replace and use_pvi are mutually exclusive")
+        from openpi.models_pytorch.pi0_encoder_replace_pytorch import PI0EncoderReplace
+
+        return PI0EncoderReplace(config)
     if getattr(config, "use_pvi", False):
         from openpi.models_pytorch.pi0_pvi_pytorch import PI0PVI
 

@@ -1,8 +1,14 @@
+from collections import defaultdict
 import os
+
+import r3m
+from termcolor import colored
 import torch
 from torch import nn
-from transformers import AutoModel, SiglipVisionModel, AutoImageProcessor, CLIPModel
-import r3m
+from transformers import AutoImageProcessor
+from transformers import AutoModel
+from transformers import CLIPModel
+from transformers import SiglipVisionModel
 
 _DINO_MEAN = (0.485, 0.456, 0.406)
 _DINO_STD = (0.229, 0.224, 0.225)
@@ -62,7 +68,20 @@ def normalize_image_to_255(image: torch.Tensor) -> torch.Tensor:
     return image * 255.0
 
 
-class DinoAuxEncoder(nn.Module):
+class AuxEncoderGradientMixin:
+    allow_trainable_encoder: bool = False
+
+    def set_trainable_encoder(self, *, enabled: bool = True) -> None:
+        self.allow_trainable_encoder = enabled
+        nested_encoder = getattr(self, "encoder", None)
+        if nested_encoder is not None and nested_encoder is not self and hasattr(nested_encoder, "set_trainable_encoder"):
+            nested_encoder.set_trainable_encoder(enabled=enabled)
+
+    def _encoder_grad_context(self):
+        return torch.set_grad_enabled(torch.is_grad_enabled() and self.allow_trainable_encoder)
+
+
+class DinoAuxEncoder(AuxEncoderGradientMixin, nn.Module):
     def __init__(self, model_name: str = "facebook/dinov2-base"):
         super().__init__()
         self.encoder = AutoModel.from_pretrained(model_name)
@@ -70,10 +89,10 @@ class DinoAuxEncoder(nn.Module):
         for param in self.encoder.parameters():
             param.requires_grad = False
 
-    @torch.no_grad()
     def forward(self, images: list[torch.Tensor]) -> tuple[torch.Tensor, int]:
         processed = []
-        for image in images:
+        for raw_image in images:
+            image = raw_image
             image = ensure_channels_first(image).to(dtype=torch.float32)
             if image.shape[-2:] != (224, 224):
                 image = torch.nn.functional.interpolate(
@@ -92,14 +111,15 @@ class DinoAuxEncoder(nn.Module):
         batch_size = processed[0].shape[0]
         num_views = len(processed)
         pixel_values = torch.stack(processed, dim=1).reshape(batch_size * num_views, 3, 224, 224)
-        outputs = self.encoder(pixel_values=pixel_values)
+        with self._encoder_grad_context():
+            outputs = self.encoder(pixel_values=pixel_values)
         patch_tokens = outputs.last_hidden_state[:, 1:, :]
         patches_per_view = patch_tokens.shape[1]
         patch_tokens = patch_tokens.reshape(batch_size, num_views * patches_per_view, self.hidden_size)
         return patch_tokens, patches_per_view
 
 
-class SigLIPAuxEncoder(nn.Module):
+class SigLIPAuxEncoder(AuxEncoderGradientMixin, nn.Module):
     def __init__(self, model_name: str = "google/siglip-base-patch16-224"):
         """
         model_name: google/siglip-base-patch16-224
@@ -115,10 +135,10 @@ class SigLIPAuxEncoder(nn.Module):
         for param in self.encoder.parameters():
             param.requires_grad = False
 
-    @torch.no_grad()
     def forward(self, images: list[torch.Tensor]) -> tuple[torch.Tensor, int]:
         processed = []
-        for image in images:
+        for raw_image in images:
+            image = raw_image
             image = ensure_channels_first(image).to(dtype=torch.float32)
             if image.shape[-2:] != (224, 224):
                 image = torch.nn.functional.interpolate(
@@ -137,7 +157,8 @@ class SigLIPAuxEncoder(nn.Module):
         batch_size = processed[0].shape[0]
         num_views = len(processed)
         pixel_values = torch.stack(processed, dim=1).reshape(batch_size * num_views, 3, 224, 224)
-        outputs = self.encoder(pixel_values=pixel_values)
+        with self._encoder_grad_context():
+            outputs = self.encoder(pixel_values=pixel_values)
         patch_tokens = outputs.last_hidden_state
         patches_per_view = patch_tokens.shape[1]
         patch_tokens = patch_tokens.reshape(batch_size, num_views * patches_per_view, self.hidden_size)
@@ -145,7 +166,7 @@ class SigLIPAuxEncoder(nn.Module):
         return patch_tokens, patches_per_view
 
 
-class CLIPAuxEncoder(nn.Module):
+class CLIPAuxEncoder(AuxEncoderGradientMixin, nn.Module):
     _CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
     _CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
@@ -155,11 +176,11 @@ class CLIPAuxEncoder(nn.Module):
         self.hidden_size = self.encoder.config.hidden_size
         for param in self.encoder.parameters():
             param.requires_grad = False
-        
-    @torch.no_grad()
+
     def forward(self, images: list[torch.Tensor]) -> tuple[torch.Tensor, int]:
         processed = []
-        for image in images:
+        for raw_image in images:
+            image = raw_image
             image = ensure_channels_first(image).to(dtype=torch.float32)
             if image.shape[-2:] != (224, 224):
                 image = torch.nn.functional.interpolate(
@@ -178,7 +199,8 @@ class CLIPAuxEncoder(nn.Module):
         batch_size = processed[0].shape[0]
         num_views = len(processed)
         pixel_values = torch.stack(processed, dim=1).reshape(batch_size * num_views, 3, 224, 224)
-        outputs = self.encoder(pixel_values=pixel_values)
+        with self._encoder_grad_context():
+            outputs = self.encoder(pixel_values=pixel_values)
         patch_tokens = outputs.last_hidden_state
         patches_per_view = patch_tokens.shape[1]
         patch_tokens = patch_tokens.reshape(batch_size, num_views * patches_per_view, self.hidden_size)
@@ -186,7 +208,7 @@ class CLIPAuxEncoder(nn.Module):
         return patch_tokens, patches_per_view
 
 
-class R3MAuxEncoder(nn.Module):
+class R3MAuxEncoder(AuxEncoderGradientMixin, nn.Module):
     def __init__(self, model_name: str = "resnet34"):
         super().__init__()
         self.encoder = r3m.load_r3m(modelid=model_name).module
@@ -194,7 +216,7 @@ class R3MAuxEncoder(nn.Module):
             self.hidden_size = 512
         elif model_name == "resnet50":
             self.hidden_size = 2048
-        
+
         for param in self.encoder.parameters():
             param.requires_grad = False
 
@@ -209,13 +231,12 @@ class R3MAuxEncoder(nn.Module):
         x = convnet.layer1(x)
         x = convnet.layer2(x)
         x = convnet.layer3(x)
-        x = convnet.layer4(x)  # (B, C, 7, 7) for 224x224 input
-        return x
+        return convnet.layer4(x)  # (B, C, 7, 7) for 224x224 input
 
-    @torch.no_grad()
     def forward(self, images: list[torch.Tensor]) -> tuple[torch.Tensor, int]:
         processed = []
-        for image in images:
+        for raw_image in images:
+            image = raw_image
             image = ensure_channels_first(image).to(dtype=torch.float32)
             if image.shape[-2:] != (224, 224):
                 image = torch.nn.functional.interpolate(
@@ -234,12 +255,13 @@ class R3MAuxEncoder(nn.Module):
         pixel_values = torch.stack(processed, dim=1).reshape(batch_size * num_views, 3, 224, 224)
 
         # Get feature map before global pooling: (B * num_views, C, 7, 7)
-        feature_map = self._forward_features(pixel_values)
-        _, C, H, W = feature_map.shape
+        with self._encoder_grad_context():
+            feature_map = self._forward_features(pixel_values)
+        _, _channels, height, width = feature_map.shape
 
         # Reshape to patch-like format: (B * num_views, H*W, C)
         patch_tokens = feature_map.flatten(2).transpose(1, 2)  # (B * num_views, 49, C)
-        patches_per_view = H * W  # 49 for 224x224 input
+        patches_per_view = height * width  # 49 for 224x224 input
 
         # Reshape to (B, num_views * patches_per_view, hidden_size)
         patch_tokens = patch_tokens.reshape(batch_size, num_views * patches_per_view, self.hidden_size)
@@ -247,9 +269,9 @@ class R3MAuxEncoder(nn.Module):
         return patch_tokens, patches_per_view
 
 
-class HPRAuxEncoder(nn.Module):
+class HPRAuxEncoder(AuxEncoderGradientMixin, nn.Module):
     _HPR_MEAN = (0.485, 0.456, 0.406)
-    _HPR_STD = (0.229, 0.224, 0.225) 
+    _HPR_STD = (0.229, 0.224, 0.225)
 
     def __init__(self, hpr_ckpt_path: str = "hpr_checkpoints/hpr_fullfinetune_base_lang_trace_negative_mod.ckpt"):
         super().__init__()
@@ -257,7 +279,7 @@ class HPRAuxEncoder(nn.Module):
         # Load HPR pretrained rgb_encoder
         if not os.path.exists(hpr_ckpt_path):
             raise FileNotFoundError(f"HPR checkpoint not found at {hpr_ckpt_path}")
-        
+
         print(f"Loading HPR checkpoint from {hpr_ckpt_path}...")
         ckpt = torch.load(hpr_ckpt_path, map_location="cpu")
         hparams = ckpt["hyper_parameters"]
@@ -281,11 +303,11 @@ class HPRAuxEncoder(nn.Module):
         self.hidden_size = self.encoder.embed_dim
         for param in self.encoder.parameters():
             param.requires_grad = False
-        
-    @torch.no_grad()
+
     def forward(self, images: list[torch.Tensor]) -> tuple[torch.Tensor, int]:
         processed = []
-        for image in images:
+        for raw_image in images:
+            image = raw_image
             image = ensure_channels_first(image).to(dtype=torch.float32)
             if image.shape[-2:] != (224, 224):
                 image = torch.nn.functional.interpolate(
@@ -300,12 +322,12 @@ class HPRAuxEncoder(nn.Module):
             mean = image.new_tensor(self._HPR_MEAN).view(1, 3, 1, 1)
             std = image.new_tensor(self._HPR_STD).view(1, 3, 1, 1)
             processed.append((image - mean) / std)
-        
+
         batch_size = processed[0].shape[0]
         num_views = len(processed)
         pixel_values = torch.stack(processed, dim=1).reshape(batch_size * num_views, 3, 224, 224)
-        outputs = self.encoder(pixel_values, is_training=True)
-        cls_token = outputs["x_norm_clstoken"]
+        with self._encoder_grad_context():
+            outputs = self.encoder(pixel_values, is_training=True)
         patch_tokens = outputs["x_norm_patchtokens"]
         patches_per_view = patch_tokens.shape[1]
         patch_tokens = patch_tokens.reshape(batch_size, num_views * patches_per_view, self.hidden_size)
@@ -328,20 +350,28 @@ class HPRAuxEncoder(nn.Module):
                     num_adapter_blocks=dinov2_num_adapter_blocks,
                 )
             else:
-                raise NotImplementedError("HPR pretrained DINOv2 with freezing is only implemented for HuggingFace DINOv2. Set use_hf_dinov2=True.")
+                raise NotImplementedError(
+                    "HPR pretrained DINOv2 with freezing is only implemented for HuggingFace DINOv2. "
+                    "Set use_hf_dinov2=True."
+                )
         elif use_pretrained_dinov2:
             if use_hf_dinov2:
                 # HuggingFace DINOv2 without adapter
                 enc = HFDinoV2FullFinetune(size=size)
             else:
-                raise NotImplementedError("HPR pretrained DINOv2 without freezing is only implemented for HuggingFace DINOv2. Set use_hf_dinov2=True.")
+                raise NotImplementedError(
+                    "HPR pretrained DINOv2 without freezing is only implemented for HuggingFace DINOv2. "
+                    "Set use_hf_dinov2=True."
+                )
         else:
-            raise NotImplementedError("HPR pretrained RGB encoder is only implemented for DINOv2. Set use_pretrained_dinov2=True.")
-        
-        return enc
-    
+            raise NotImplementedError(
+                "HPR pretrained RGB encoder is only implemented for DINOv2. Set use_pretrained_dinov2=True."
+            )
 
-class HFFrozenDinoV2WithAdapter(nn.Module):
+        return enc
+
+
+class HFFrozenDinoV2WithAdapter(AuxEncoderGradientMixin, nn.Module):
     """
     Hugging Face DINOv2 (frozen) + HF Dinov2Layer as trainable adapter blocks.
     Fully PEFT/LoRA compatible.
@@ -352,7 +382,7 @@ class HFFrozenDinoV2WithAdapter(nn.Module):
 
     def __init__(
         self,
-        size: str = 'base',
+        size: str = "base",
         num_adapter_blocks: int = 4,
     ):
         super().__init__()
@@ -363,9 +393,9 @@ class HFFrozenDinoV2WithAdapter(nn.Module):
 
         # HF model map
         hf_model_map = {
-            'small': 'facebook/dinov2-small',
-            'base': 'facebook/dinov2-base',
-            'large': 'facebook/dinov2-large',
+            "small": "facebook/dinov2-small",
+            "base": "facebook/dinov2-base",
+            "large": "facebook/dinov2-large",
         }
 
         # Load HF DINOv2
@@ -391,21 +421,18 @@ class HFFrozenDinoV2WithAdapter(nn.Module):
             drop_path_rate=0.0,
         )
 
-        self.adapter_blocks = nn.ModuleList([
-            Dinov2Layer(adapter_config)
-            for _ in range(num_adapter_blocks)
-        ])
+        self.adapter_blocks = nn.ModuleList([Dinov2Layer(adapter_config) for _ in range(num_adapter_blocks)])
         self.adapter_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
         print(f"  num_adapter_blocks: {num_adapter_blocks}")
 
-    def train(self, mode=True):
+    def train(self, mode=True):  # noqa: FBT002
         """Override train to keep backbone frozen."""
         super().train(mode)
         self.backbone.eval()
         return self
 
-    def forward(self, x, is_training=False):
+    def forward(self, x, is_training=False):  # noqa: FBT002
         """
         Forward pass matching DINOv2 interface.
 
@@ -418,7 +445,7 @@ class HFFrozenDinoV2WithAdapter(nn.Module):
             If is_training=False: cls_token (B, embed_dim)
         """
         # HF forward (expects pixel_values)
-        with torch.no_grad():
+        with self._encoder_grad_context():
             outputs = self.backbone(pixel_values=x)
 
         # Get last hidden state: (B, 1+num_patches, embed_dim)
@@ -451,15 +478,15 @@ class HFDinoV2FullFinetune(nn.Module):
         Image -> [HF DINOv2 (trainable)] -> last_hidden_state -> output
     """
 
-    def __init__(self, size: str = 'base'):
+    def __init__(self, size: str = "base"):
         super().__init__()
 
         from transformers import Dinov2Model
 
         hf_model_map = {
-            'small': 'facebook/dinov2-small',
-            'base': 'facebook/dinov2-base',
-            'large': 'facebook/dinov2-large',
+            "small": "facebook/dinov2-small",
+            "base": "facebook/dinov2-base",
+            "large": "facebook/dinov2-large",
         }
 
         self.backbone = Dinov2Model.from_pretrained(hf_model_map[size])
@@ -468,7 +495,7 @@ class HFDinoV2FullFinetune(nn.Module):
         print(f"Loaded HF DINOv2 (full finetune): {hf_model_map[size]}")
         print(f"  hidden_size: {self.embed_dim}")
 
-    def forward(self, x, is_training=False):
+    def forward(self, x, is_training=False):  # noqa: FBT002
         """
         Forward pass matching DINOv2 interface.
 
@@ -491,15 +518,11 @@ class HFDinoV2FullFinetune(nn.Module):
                 "x_norm_patchtokens": patch_tokens,
             }
         return cls_token
-    
 
-from typing import Any, Dict, List
-from termcolor import colored
-from collections import defaultdict
-    
-def get_missing_parameters_message(keys: List[str]) -> str:
+
+def get_missing_parameters_message(keys: list[str]) -> str:
     """
-    Get a logging-friendly message to report parameter names (keys) that are in 
+    Get a logging-friendly message to report parameter names (keys) that are in
     the model but not found in a checkpoint.
     Args:
         keys (list[str]): List of keys that were not found in the checkpoint.
@@ -517,9 +540,9 @@ def get_missing_parameters_message(keys: List[str]) -> str:
     return msg
 
 
-def get_unexpected_parameters_message(keys: List[str]) -> str:
+def get_unexpected_parameters_message(keys: list[str]) -> str:
     """
-    Get a logging-friendly message to report parameter names (keys) that are in 
+    Get a logging-friendly message to report parameter names (keys) that are in
     the checkpoint but not found in the model.
     Args:
         keys (list[str]): List of keys that were not found in the model.
@@ -533,7 +556,8 @@ def get_unexpected_parameters_message(keys: List[str]) -> str:
     )
     return msg
 
-def _group_checkpoint_keys(keys: List[str]) -> Dict[str, List[str]]:
+
+def _group_checkpoint_keys(keys: list[str]) -> dict[str, list[str]]:
     """
     Group keys based on common prefixes. A prefix is the string up to the final
     "." in the key.
@@ -554,7 +578,7 @@ def _group_checkpoint_keys(keys: List[str]) -> Dict[str, List[str]]:
     return groups
 
 
-def _group_to_str(group: List[str]) -> str:
+def _group_to_str(group: list[str]) -> str:
     """
     Format a group of parameter name suffixes into a loggable string.
     Args:

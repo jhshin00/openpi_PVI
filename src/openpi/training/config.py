@@ -639,6 +639,54 @@ def _robotwin_aloha_pvi_train_config(
     )
 
 
+def _robotwin_encoder_replace_train_config(
+    name: str,
+    *,
+    encoder_type: str,
+    encoder_name: str,
+    encoder_replace_variant: Literal["v1", "v2", "v3"] = "v1",
+    encoder_replace_lora_rank: int = 16,
+    encoder_replace_lora_alpha: float = 16.0,
+    encoder_replace_action_lora_rank: int = 32,
+    encoder_replace_action_lora_alpha: float = 32.0,
+    exp_name: str | None = None,
+) -> TrainConfig:
+    return TrainConfig(
+        name=name,
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            discrete_state_input=False,
+            use_encoder_replace=True,
+            encoder_replace_encoder_type=encoder_type,
+            encoder_replace_encoder_name=encoder_name,
+            encoder_replace_variant=encoder_replace_variant,
+            encoder_replace_lora_rank=encoder_replace_lora_rank,
+            encoder_replace_lora_alpha=encoder_replace_lora_alpha,
+            encoder_replace_action_lora_rank=encoder_replace_action_lora_rank,
+            encoder_replace_action_lora_alpha=encoder_replace_action_lora_alpha,
+        ),
+        data=_robotwin_data_config(assets=AssetsConfig(assets_dir="./assets/pi05_robotwin_encoder_replace")),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=4_000,
+            peak_lr=3.5e-5,
+            decay_steps=30_000,
+            decay_lr=3.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="./checkpoints/pytorch/pi05_base",
+        num_train_steps=30_000,
+        batch_size=32,
+        num_workers=4,
+        save_interval=2000,
+        keep_period=10000,
+        overwrite=False,
+        resume=False,
+        exp_name=exp_name or name,
+    )
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -1183,7 +1231,6 @@ _CONFIGS = [
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
-    
 
     # jhshin experiment
      TrainConfig(
@@ -1492,6 +1539,60 @@ _CONFIGS = [
         overwrite=False,
         resume=False,
         exp_name="pi05_robotwin_pvi_from_base",
+    ),
+    _robotwin_encoder_replace_train_config(
+        name="pi05_robotwin_encoder_replace_from_base",
+        encoder_type="dinov2",
+        encoder_name="facebook/dinov2-base",
+    ),
+    _robotwin_encoder_replace_train_config(
+        name="pi05_robotwin_encoder_replace_dino",
+        encoder_type="dinov2",
+        encoder_name="facebook/dinov2-base",
+    ),
+    _robotwin_encoder_replace_train_config(
+        name="pi05_robotwin_encoder_replace_siglip",
+        encoder_type="siglip",
+        encoder_name="google/siglip-base-patch16-224",
+    ),
+    _robotwin_encoder_replace_train_config(
+        name="pi05_robotwin_encoder_replace_siglip_v2",
+        encoder_type="siglip",
+        encoder_name="google/siglip-base-patch16-224",
+        encoder_replace_variant="v2",
+    ),
+    _robotwin_encoder_replace_train_config(
+        name="pi05_robotwin_encoder_replace_siglip_v3",
+        encoder_type="siglip",
+        encoder_name="google/siglip-base-patch16-224",
+        encoder_replace_variant="v3",
+    ),
+    _robotwin_encoder_replace_train_config(
+        name="pi05_robotwin_encoder_replace_clip",
+        encoder_type="clip",
+        encoder_name="openai/clip-vit-base-patch32",
+    ),
+    _robotwin_encoder_replace_train_config(
+        name="pi05_robotwin_encoder_replace_r3m",
+        encoder_type="r3m",
+        encoder_name="resnet34",
+    ),
+    _robotwin_encoder_replace_train_config(
+        name="pi05_robotwin_encoder_replace_hpr",
+        encoder_type="hpr",
+        encoder_name="hpr_checkpoints/hpr_fullfinetune_base_lang_trace_negative_mod.ckpt",
+    ),
+    _robotwin_encoder_replace_train_config(
+        name="pi05_robotwin_encoder_replace_hpr_v2",
+        encoder_type="hpr",
+        encoder_name="hpr_checkpoints/hpr_fullfinetune_base_lang_trace_negative_mod.ckpt",
+        encoder_replace_variant="v2",
+    ),
+    _robotwin_encoder_replace_train_config(
+        name="pi05_robotwin_encoder_replace_hpr_v3",
+        encoder_type="hpr",
+        encoder_name="hpr_checkpoints/hpr_fullfinetune_base_lang_trace_negative_mod.ckpt",
+        encoder_replace_variant="v3",
     ),
     _robotwin_aloha_pvi_train_config(
         name="pi05_robotwin_aloha_pvi_dino",
