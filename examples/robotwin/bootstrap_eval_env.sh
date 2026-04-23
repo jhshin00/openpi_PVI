@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ROBOTWIN_DIR="${ROOT_DIR}/third_party/robotwin"
+CUROBO_COMMIT="cca894de9ec74e77a0a4071319c81958991a9108"
 
 PYTHON_VERSION="3.11"
 VENV_DIR="${SCRIPT_DIR}/.venv"
@@ -28,9 +29,11 @@ This script follows the RoboTwin official Pi0.5 flow:
 1. create a dedicated uv virtualenv
 2. install openpi into that env
 3. install RoboTwin simulator dependencies
-4. apply the official sapien/mplib patches
-5. install CuRobo
-6. optionally download RoboTwin assets
+4. install R3M with no dependency resolution
+5. install PyTorch3D
+6. apply the official sapien/mplib patches
+7. install the RoboTwin-compatible CuRobo revision
+8. optionally download RoboTwin assets
 EOF
 }
 
@@ -85,26 +88,30 @@ fi
 
 mkdir -p "$(dirname "${VENV_DIR}")"
 
-echo "[1/6] Creating eval env at ${VENV_DIR} with Python ${PYTHON_VERSION}"
+echo "[1/8] Creating eval env at ${VENV_DIR} with Python ${PYTHON_VERSION}"
 uv venv --python "${PYTHON_VERSION}" "${VENV_DIR}"
 
 # shellcheck source=/dev/null
 source "${VENV_DIR}/bin/activate"
 
-echo "[2/6] Installing openpi into the active eval env"
+echo "[2/8] Installing openpi into the active eval env"
 GIT_LFS_SKIP_SMUDGE=1 uv sync --project "${ROOT_DIR}" --active --frozen --no-dev
 
-echo "[3/6] Installing RoboTwin simulator extras"
+echo "[3/8] Installing RoboTwin simulator extras"
 uv pip install -r "${SCRIPT_DIR}/requirements-eval.txt"
+uv pip install "pytest>=8.3.4" "hydra-core>=1.3,<1.4"
+
+echo "[4/8] Installing R3M without transitive dependencies"
+uv pip install "git+https://github.com/facebookresearch/r3m.git" --no-deps
 
 if [[ "${INSTALL_PYTORCH3D}" -eq 1 ]]; then
-  echo "[4/6] Installing PyTorch3D"
+  echo "[5/8] Installing PyTorch3D"
   uv pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
 else
-  echo "[4/6] Skipping PyTorch3D installation"
+  echo "[5/8] Skipping PyTorch3D installation"
 fi
 
-echo "[5/6] Applying RoboTwin patches to sapien and mplib"
+echo "[6/8] Applying RoboTwin patches to sapien and mplib"
 python - <<'PY'
 from pathlib import Path
 import inspect
@@ -151,23 +158,34 @@ replace_once(
 PY
 
 if [[ "${INSTALL_CUROBO}" -eq 1 ]]; then
-  echo "[6/6] Installing CuRobo"
-  if [[ ! -d "${ROBOTWIN_DIR}/envs/curobo/.git" ]]; then
-    git clone https://github.com/NVlabs/curobo.git "${ROBOTWIN_DIR}/envs/curobo"
+  echo "[7/8] Installing CuRobo at ${CUROBO_COMMIT}"
+  CUROBO_DIR="${ROBOTWIN_DIR}/envs/curobo"
+  if [[ ! -d "${CUROBO_DIR}/.git" ]]; then
+    git clone https://github.com/NVlabs/curobo.git "${CUROBO_DIR}"
   fi
-  uv pip install -e "${ROBOTWIN_DIR}/envs/curobo" --no-build-isolation
+  git -C "${CUROBO_DIR}" fetch origin "${CUROBO_COMMIT}"
+  git -C "${CUROBO_DIR}" checkout "${CUROBO_COMMIT}"
+  uv pip uninstall nvidia-curobo curobo || true
+  uv pip install -e "${CUROBO_DIR}" --no-build-isolation
+  python - <<'PY'
+from curobo.types.math import Pose
+from curobo.types.robot import JointState
+from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig
+
+print("CuRobo import check ok:", Pose, JointState, MotionGen, MotionGenConfig)
+PY
 else
-  echo "[6/6] Skipping CuRobo installation"
+  echo "[7/8] Skipping CuRobo installation"
 fi
 
 if [[ "${DOWNLOAD_ASSETS}" -eq 1 ]]; then
-  echo "Downloading RoboTwin assets"
+  echo "[8/8] Downloading RoboTwin assets"
   (
     cd "${ROBOTWIN_DIR}"
     bash script/_download_assets.sh
   )
 else
-  echo "Skipping RoboTwin asset download. Run with --download-assets when ready."
+  echo "[8/8] Skipping RoboTwin asset download. Run with --download-assets when ready."
 fi
 
 cat <<EOF

@@ -269,6 +269,7 @@ def main(args: Args) -> None:
     asset_id_override = args.asset_id_override or _infer_checkpoint_asset_id(checkpoint_dir)
     task_config_path = Path("task_config") / f"{args.task_config}.yml"
     task_args = _prepare_robotwin_args(args, task_config_path, configs_path)
+    task_args["eval_mode"] = True
 
     checkpoint_label = checkpoint_dir.relative_to(repo_root) if checkpoint_dir.is_relative_to(repo_root) else checkpoint_dir.name
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
