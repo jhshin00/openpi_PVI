@@ -9,6 +9,7 @@ model_name=${4:?model_name is required}
 seed=${5:?seed is required}
 gpu_id=${6:?gpu_id is required}
 checkpoint_id=${7:-30000}
+extra_args=("${@:8}")
 
 export CUDA_VISIBLE_DEVICES="${gpu_id}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
@@ -19,4 +20,5 @@ python examples/robotwin/eval.py \
   --task-config "${task_config}" \
   --exp-name "${model_name}" \
   --seed "${seed}" \
-  --checkpoint-id "${checkpoint_id}"
+  --checkpoint-id "${checkpoint_id}" \
+  "${extra_args[@]}"

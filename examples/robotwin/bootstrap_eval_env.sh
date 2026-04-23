@@ -29,11 +29,12 @@ This script follows the RoboTwin official Pi0.5 flow:
 1. create a dedicated uv virtualenv
 2. install openpi into that env
 3. install RoboTwin simulator dependencies
-4. install R3M with no dependency resolution
-5. install PyTorch3D
-6. apply the official sapien/mplib patches
-7. install the RoboTwin-compatible CuRobo revision
-8. optionally download RoboTwin assets
+4. apply the local transformers replacement modules
+5. install R3M with no dependency resolution
+6. install PyTorch3D
+7. apply the official sapien/mplib patches
+8. install the RoboTwin-compatible CuRobo revision
+9. optionally download RoboTwin assets
 EOF
 }
 
@@ -88,30 +89,57 @@ fi
 
 mkdir -p "$(dirname "${VENV_DIR}")"
 
-echo "[1/8] Creating eval env at ${VENV_DIR} with Python ${PYTHON_VERSION}"
+echo "[1/9] Creating eval env at ${VENV_DIR} with Python ${PYTHON_VERSION}"
 uv venv --python "${PYTHON_VERSION}" "${VENV_DIR}"
 
 # shellcheck source=/dev/null
 source "${VENV_DIR}/bin/activate"
 
-echo "[2/8] Installing openpi into the active eval env"
+echo "[2/9] Installing openpi into the active eval env"
 GIT_LFS_SKIP_SMUDGE=1 uv sync --project "${ROOT_DIR}" --active --frozen --no-dev
 
-echo "[3/8] Installing RoboTwin simulator extras"
+echo "[3/9] Installing RoboTwin simulator extras"
 uv pip install -r "${SCRIPT_DIR}/requirements-eval.txt"
 uv pip install "pytest>=8.3.4" "hydra-core>=1.3,<1.4"
 
-echo "[4/8] Installing R3M without transitive dependencies"
+echo "[4/9] Applying transformers_replace to the active eval env"
+python - <<'PY'
+from pathlib import Path
+import shutil
+import transformers
+
+source_dir = Path("src/openpi/models_pytorch/transformers_replace").resolve()
+target_dir = Path(transformers.__file__).resolve().parent
+for path in source_dir.iterdir():
+    destination = target_dir / path.name
+    if path.is_dir():
+        shutil.copytree(path, destination, dirs_exist_ok=True)
+    else:
+        shutil.copy2(path, destination)
+print(f"Copied transformers_replace from {source_dir} to {target_dir}")
+PY
+python - <<'PY'
+import transformers
+from transformers.models.siglip import check
+
+if transformers.__version__ != "4.53.2":
+    raise RuntimeError(f"Expected transformers==4.53.2, got {transformers.__version__}")
+if not check.check_whether_transformers_replace_is_installed_correctly():
+    raise RuntimeError("transformers_replace check failed")
+print("transformers_replace check ok")
+PY
+
+echo "[5/9] Installing R3M without transitive dependencies"
 uv pip install "git+https://github.com/facebookresearch/r3m.git" --no-deps
 
 if [[ "${INSTALL_PYTORCH3D}" -eq 1 ]]; then
-  echo "[5/8] Installing PyTorch3D"
+  echo "[6/9] Installing PyTorch3D"
   uv pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
 else
-  echo "[5/8] Skipping PyTorch3D installation"
+  echo "[6/9] Skipping PyTorch3D installation"
 fi
 
-echo "[6/8] Applying RoboTwin patches to sapien and mplib"
+echo "[7/9] Applying RoboTwin patches to sapien and mplib"
 python - <<'PY'
 from pathlib import Path
 import inspect
@@ -158,7 +186,7 @@ replace_once(
 PY
 
 if [[ "${INSTALL_CUROBO}" -eq 1 ]]; then
-  echo "[7/8] Installing CuRobo at ${CUROBO_COMMIT}"
+  echo "[8/9] Installing CuRobo at ${CUROBO_COMMIT}"
   CUROBO_DIR="${ROBOTWIN_DIR}/envs/curobo"
   if [[ ! -d "${CUROBO_DIR}/.git" ]]; then
     git clone https://github.com/NVlabs/curobo.git "${CUROBO_DIR}"
@@ -175,17 +203,17 @@ from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig
 print("CuRobo import check ok:", Pose, JointState, MotionGen, MotionGenConfig)
 PY
 else
-  echo "[7/8] Skipping CuRobo installation"
+  echo "[8/9] Skipping CuRobo installation"
 fi
 
 if [[ "${DOWNLOAD_ASSETS}" -eq 1 ]]; then
-  echo "[8/8] Downloading RoboTwin assets"
+  echo "[9/9] Downloading RoboTwin assets"
   (
     cd "${ROBOTWIN_DIR}"
     bash script/_download_assets.sh
   )
 else
-  echo "[8/8] Skipping RoboTwin asset download. Run with --download-assets when ready."
+  echo "[9/9] Skipping RoboTwin asset download. Run with --download-assets when ready."
 fi
 
 cat <<EOF

@@ -59,6 +59,9 @@ class Args:
     pytorch_device: str | None = None
     asset_id_override: str | None = None
     clear_cache_freq_override: int | None = None
+    disable_video: bool = False
+    disable_torch_compile: bool = False
+    log_validation_tracebacks: bool = False
 
 
 class OpenPIRobotwinPolicy:
@@ -259,6 +262,11 @@ def main(args: Args) -> None:
     repo_root = Path.cwd().resolve()
     robotwin_root = args.robotwin_root.resolve()
     train_config = _config.get_config(args.train_config)
+    if args.disable_torch_compile and hasattr(train_config.model, "pytorch_compile_mode"):
+        train_config = dataclasses.replace(
+            train_config,
+            model=dataclasses.replace(train_config.model, pytorch_compile_mode=None),
+        )
     checkpoint_dir = _infer_checkpoint_dir(args, train_config, repo_root)
 
     os.chdir(robotwin_root)
@@ -270,6 +278,8 @@ def main(args: Args) -> None:
     task_config_path = Path("task_config") / f"{args.task_config}.yml"
     task_args = _prepare_robotwin_args(args, task_config_path, configs_path)
     task_args["eval_mode"] = True
+    if args.disable_video:
+        task_args["eval_video_log"] = False
 
     checkpoint_label = checkpoint_dir.relative_to(repo_root) if checkpoint_dir.is_relative_to(repo_root) else checkpoint_dir.name
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -321,7 +331,10 @@ def main(args: Args) -> None:
             task_env.close_env()
             current_seed += 1
             task_args["render_freq"] = render_freq
-            logging.exception("RoboTwin expert rollout failed during seed validation")
+            if args.log_validation_tracebacks:
+                logging.exception("RoboTwin expert rollout failed during seed validation")
+            else:
+                logging.warning("RoboTwin expert rollout failed during seed validation; skipping seed=%s", current_seed - 1)
             continue
 
         if not (task_env.plan_success and task_env.check_success()):
