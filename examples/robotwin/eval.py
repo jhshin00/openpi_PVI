@@ -36,8 +36,8 @@ if str(REPO_ROOT) not in sys.path:
 if str(REPO_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from openpi.policies import policy_config as _policy_config
-from openpi.training import config as _config
+from openpi.policies import policy_config as _policy_config  # noqa: E402
+from openpi.training import config as _config  # noqa: E402
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,6 +51,7 @@ class Args:
     checkpoint_base_dir: Path = REPO_ROOT / "checkpoints_local"
     robotwin_root: Path = Path("third_party/robotwin")
     result_root: Path = Path("./eval_result/robotwin")
+    summary_output: Path | None = None
     instruction_type: str = "unseen"
     seed: int = 0
     test_num: int = 100
@@ -261,6 +262,7 @@ def main(args: Args) -> None:
 
     repo_root = Path.cwd().resolve()
     robotwin_root = args.robotwin_root.resolve()
+    summary_output = args.summary_output.resolve() if args.summary_output is not None else None
     train_config = _config.get_config(args.train_config)
     if args.disable_torch_compile and hasattr(train_config.model, "pytorch_compile_mode"):
         train_config = dataclasses.replace(
@@ -281,10 +283,19 @@ def main(args: Args) -> None:
     if args.disable_video:
         task_args["eval_video_log"] = False
 
-    checkpoint_label = checkpoint_dir.relative_to(repo_root) if checkpoint_dir.is_relative_to(repo_root) else checkpoint_dir.name
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    checkpoint_label = (
+        checkpoint_dir.relative_to(repo_root) if checkpoint_dir.is_relative_to(repo_root) else checkpoint_dir.name
+    )
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")  # noqa: DTZ005
     result_root = (repo_root / args.result_root).resolve()
-    result_dir = result_root / args.task_name / args.train_config / args.task_config / str(checkpoint_label).replace("/", "_") / timestamp
+    result_dir = (
+        result_root
+        / args.task_name
+        / args.train_config
+        / args.task_config
+        / str(checkpoint_label).replace("/", "_")
+        / timestamp
+    )
     result_dir.mkdir(parents=True, exist_ok=True)
 
     if task_args["eval_video_log"]:
@@ -334,7 +345,9 @@ def main(args: Args) -> None:
             if args.log_validation_tracebacks:
                 logging.exception("RoboTwin expert rollout failed during seed validation")
             else:
-                logging.warning("RoboTwin expert rollout failed during seed validation; skipping seed=%s", current_seed - 1)
+                logging.warning(
+                    "RoboTwin expert rollout failed during seed validation; skipping seed=%s", current_seed - 1
+                )
             continue
 
         if not (task_env.plan_success and task_env.check_success()):
@@ -357,7 +370,7 @@ def main(args: Args) -> None:
         ffmpeg = None
         if video_size is not None and task_env.eval_video_path is not None:
             ffmpeg = _create_video_writer(task_env, video_size)
-            task_env._set_eval_video_ffmpeg(ffmpeg)
+            task_env._set_eval_video_ffmpeg(ffmpeg)  # noqa: SLF001
 
         policy.reset()
         succeeded = False
@@ -369,7 +382,7 @@ def main(args: Args) -> None:
                 break
 
         if task_env.eval_video_path is not None:
-            task_env._del_eval_video_ffmpeg()
+            task_env._del_eval_video_ffmpeg()  # noqa: SLF001
 
         if succeeded:
             success_count += 1
@@ -398,7 +411,9 @@ def main(args: Args) -> None:
         "task_name": args.task_name,
         "task_config": args.task_config,
         "train_config": args.train_config,
+        "checkpoint_id": args.checkpoint_id,
         "checkpoint_dir": str(checkpoint_dir),
+        "result_dir": str(result_dir),
         "asset_id_override": asset_id_override,
         "instruction_type": args.instruction_type,
         "seed": args.seed,
@@ -406,8 +421,13 @@ def main(args: Args) -> None:
         "success_count": success_count,
         "success_rate": success_count / args.test_num,
     }
-    with (result_dir / "summary.json").open("w", encoding="utf-8") as f:
+    summary_path = result_dir / "summary.json"
+    with summary_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
+    if summary_output is not None:
+        summary_output.parent.mkdir(parents=True, exist_ok=True)
+        with summary_output.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
 
     print(json.dumps(summary, indent=2))
 

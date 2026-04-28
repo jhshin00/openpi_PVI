@@ -27,6 +27,7 @@ References:
 - `examples/robotwin/compute_norm_stats.sh`
 - `examples/robotwin/finetune.sh`
 - `examples/robotwin/eval.sh`
+- `examples/robotwin/eval_encoder_replace_v1_sweep.sh`
 - `examples/robotwin/bootstrap_eval_env.sh`: creates the RoboTwin eval env
 
 ## Directory Convention
@@ -344,6 +345,39 @@ bash examples/robotwin/eval.sh \
   demo_clean_single \
   0 \
   0
+```
+
+For encoder-replacement v1 task/encoder sweeps, activate the RoboTwin eval env and run:
+
+```bash
+source examples/robotwin/.venv/bin/activate
+
+bash examples/robotwin/eval_encoder_replace_v1_sweep.sh
+```
+
+Default sweep settings:
+
+- GPUs: `0,1,6,7`
+- task config: `demo_clean`
+- checkpoint: `30000`
+- encoders: `dinov2,siglip,clip,r3m`
+- tasks: `robotwin_lift_pot_aloha_agilex_clean_50`, `robotwin_move_can_pot_aloha_agilex_clean_50`, `robotwin_beat_hammer_block_aloha_agilex_clean_50`
+- eval flags: `--disable-video --disable-torch-compile`
+
+The script writes per-run logs and summaries under `./eval_result/robotwin_sweeps/<timestamp>/`,
+then prints a compact result table and writes `results.tsv`.
+
+Positional arguments are:
+
+```text
+<gpu_use> <task_config> <checkpoint_id> <encoders> <seed> <test_num> [tasks...] [-- extra eval.py args]
+```
+
+For example, to evaluate only HPR on one task:
+
+```bash
+bash examples/robotwin/eval_encoder_replace_v1_sweep.sh \
+  2 demo_clean 30000 hpr 0 100 beat_block_hammer
 ```
 
 ### Multi-Task Example
