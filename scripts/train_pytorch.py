@@ -93,7 +93,30 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, enabled: bool = T
 
 def setup_ddp():
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", str(world_size)))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     use_ddp = world_size > 1
+
+    if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>")
+        if local_world_size > device_count:
+            raise RuntimeError(
+                f"torchrun requested {local_world_size} local processes, but PyTorch sees only "
+                f"{device_count} CUDA device(s). CUDA_VISIBLE_DEVICES={visible_devices}. "
+                "Use --nproc_per_node no larger than the visible device count, or set "
+                "CUDA_VISIBLE_DEVICES to valid GPU ids."
+            )
+        if local_rank >= device_count:
+            raise RuntimeError(
+                f"LOCAL_RANK={local_rank} is out of range for {device_count} visible CUDA device(s). "
+                f"CUDA_VISIBLE_DEVICES={visible_devices}."
+            )
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+
     if use_ddp and not torch.distributed.is_initialized():
         backend = "nccl" if torch.cuda.is_available() else "gloo"
         torch.distributed.init_process_group(backend=backend, init_method="env://")
@@ -102,10 +125,6 @@ def setup_ddp():
         if os.environ.get("TORCH_DISTRIBUTED_DEBUG") is None:
             os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
 
-    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
-    device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
-    if torch.cuda.is_available():
-        torch.cuda.set_device(device)
     return use_ddp, local_rank, device
 
 
